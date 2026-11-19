@@ -1,26 +1,13 @@
-// 网关地址从哪来、/v1/models 怎么拉。core 里唯一的网络与「地址」概念都在这一层。
-//
-// 这一层**不认任何环境变量名**：候选列表由调用方按优先级排好传进来，配置文件读取器
-// （路径、键名、格式）也由调用方给。core 只负责「按顺序挑第一个能用的 http(s) 地址」
-// 和「写错的地址要报错，不许悄悄换成默认值」这两件事。
+// 网关地址从哪来、/v1/models 怎么拉 —— core 里唯一的网络与「地址」概念都在这一层。
+// 这里不认任何环境变量名、不读配置文件：候选与读取器由调用方给，这一层只按顺序挑第一个能用的 http(s) 地址。
 
 import { modelsFromPayload } from "./catalog.ts";
 import type { CatalogResult } from "./types.ts";
 
-/**
- * 调用方没给超时时的默认值。
- *
- * 5 秒是为了「别永远挂着」，不是任何宿主的最优值：启动路径上被 await 的调用方
- * （启动要多等多久，谁等谁负责）必须自己传一个更小的数。
- */
+/** 调用方没给超时时的默认值；启动路径上被 await 的调用方必须自己传更小的数 */
 export const DEFAULT_TIMEOUT_MS = 5000;
 
-/**
- * 一级地址来源。
- *
- * `from` 是**调用方起的名字**，会原样进 ResolvedGateway 并被宿主显示给用户
- * （用户要知道「这个地址是从哪一级来的」才能去改对地方）。
- */
+/** 一级地址来源。`from` 是调用方起的名字，会原样进 ResolvedGateway 并显示给用户 */
 export interface GatewayCandidate {
   readonly from: string;
   /** 原始值；空白与末尾斜杠由 core 清理，空串表示这一级没配 */
@@ -47,12 +34,12 @@ export type ResolvedGateway =
   | { ok: true; gateway: string; from: string }
   | { ok: false; error: string };
 
-/** 末尾的斜杠一律去掉：后面统一拼 `/v1/models` */
+/** 末尾斜杠一律去掉：后面统一拼 `/v1/models` */
 function clean(value: unknown): string {
   return typeof value === "string" ? value.trim().replace(/\/+$/, "") : "";
 }
 
-/** http(s) 才认。写错的地址（少了 scheme、写成 file://）在这里就报出来 */
+/** 只认 http(s)：写错的地址（少了 scheme、写成 file://）在这里就报出来 */
 function usable(value: string): boolean {
   try {
     const url = new URL(value);
@@ -63,10 +50,8 @@ function usable(value: string): boolean {
 }
 
 /**
- * 这次要用的网关地址：候选（按调用方给的顺序）→ 配置文件 → 调用方的默认值。
- *
- * 前两级写错了（不是 http(s)）就报错，不悄悄换成下一级 —— 写错地址的人需要知道写错了，
- * 拿默认值顶上去只会让他以为配置生效了，然后在「明明配了却不生效」里绕很久。
+ * 候选（调用方给的顺序）→ 配置文件 → 调用方的默认值。
+ * 前两级写错了就报错，不悄悄换成下一级 —— 拿默认值顶上去的人会以为配置生效了。
  */
 export function resolveGateway(options: ResolveGatewayOptions): ResolvedGateway {
   for (const candidate of options.candidates) {
@@ -86,19 +71,12 @@ export function resolveGateway(options: ResolveGatewayOptions): ResolvedGateway 
   return { ok: true, gateway: clean(options.fallback), from: "default" };
 }
 
-/**
- * 锁定报文方言。
- *
- * 同一份目录有不止一种渲染（字段名与层级各不相同），选哪种由 `?dialect=` 或请求头决定，
- * **默认值在网关那边**。默认值随手一改，core 解析的字段名就整体错位（`limit.context` 读成
- * 空值之类），而且不会报错、只会静默拿到一堆缺省值。所以方言写进 URL，不依赖网关的默认值。
- */
+/** 锁定报文方言：默认值在网关那边，随手一改就整体错位且不报错 */
 export const MODELS_DIALECT = "openai";
 
-/** 网关的模型清单地址。主路由是根路径下的 /v1/models，方言锁定在 query 上 */
+/** 网关的模型清单地址：根路径下的 /v1/models，方言锁在 query 上 */
 export function modelsUrl(gateway: string): string {
-  // 地址自带 query 时（调用方可能带 token 之类）用 & 接在已有参数后面，不然会拼出两个 "?"，
-  // 第二个 "?" 之后的参数网关根本不看 —— 方言就静默失效了
+  // 地址自带 query 时用 & 接上：拼出第二个 "?" 会让它之后的参数被网关忽略，方言就静默失效了
   const cut = gateway.indexOf("?");
   const base = cut === -1 ? gateway : gateway.slice(0, cut);
   const query = cut === -1 ? "" : gateway.slice(cut + 1);
@@ -108,28 +86,24 @@ export function modelsUrl(gateway: string): string {
 
 export type ModelListResult =
   | { ok: true; data: unknown[] }
-  /** cancelled：调用方自己取消了这次刷新，不是网关的问题，不该当成失败报给人看 */
+  /** 调用方自己取消了这次刷新，不是网关的问题，不该当成失败报给人看 */
   | { ok: false; cancelled: boolean; error: string };
 
 export interface FetchOptions {
   timeoutMs?: number;
-  /** 调用方的取消信号（刷新目录时会带）；与超时取先到的一个 */
+  /** 调用方的取消信号；与超时取先到的一个 */
   signal?: AbortSignal;
-  /** 注入 fetch 用，测试靠它制造永不响应/非 JSON 的上游 */
+  /** 注入 fetch，测试靠它制造永不响应、非 JSON 的上游 */
   fetchImpl?: typeof fetch;
 }
 
-/**
- * 拉原始清单。**任何失败都只是 error，不抛**：调用方常常在启动路径上等它，
- * 不能让一次拉不到把宿主的启动搞崩。
- */
+/** 拉原始清单。任何失败都只是 error，不抛：调用方常在启动路径上等它 */
 export async function fetchModelList(gateway: string, options: FetchOptions = {}): Promise<ModelListResult> {
   const url = modelsUrl(gateway);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const run = options.fetchImpl ?? fetch;
 
-  // 传进来的 signal 可能已经 abort 了（调用方会把旧那次刷新取消掉）。已经 abort 的
-  // signal 不再触发 abort 事件，光加监听器会眼看着请求照发出去
+  // 传进来的 signal 可能已经 abort 了：已 abort 的 signal 不再触发 abort 事件，光加监听器会眼看着请求照发
   if (options.signal?.aborted) return { ok: false, cancelled: true, error: `${url} cancelled` };
 
   const controller = new AbortController();
@@ -157,8 +131,7 @@ export async function fetchModelList(gateway: string, options: FetchOptions = {}
     const payload: unknown = await response.json().catch(() => undefined);
     if (typeof payload !== "object" || payload === null) return fail(`${url} did not answer a JSON object`);
     const data = (payload as Record<string, unknown>).data;
-    // data 不是数组时按失败处理而不是按空清单处理：空清单会让调用方以为
-    // 「网关上一个模型都没有」，那是另一件事（也不注册，但警告的含义不同）
+    // data 不是数组按失败处理而不是按空清单：两者都不注册，但警告的含义不同
     if (!Array.isArray(data)) return fail(`${url} has no "data" list`);
     return { ok: true, data };
   } catch (error) {
@@ -171,12 +144,7 @@ export async function fetchModelList(gateway: string, options: FetchOptions = {}
   }
 }
 
-/**
- * 拉一份能直接用的目录：把 data 归一化成 ModelSpec[]，并把「空清单」判成失败。
- *
- * 空清单为什么算失败：拿 0 条去注册/替换，等于把用户手上能用的模型清空（legacy 形式的
- * models 是替换语义）。所以它必须是 error，调用方才能走「保持原状」那一条分支。
- */
+/** 拉一份能直接用的目录：空清单判成失败 —— 拿 0 条去替换等于把用户的模型清空 */
 export async function fetchCatalog(gateway: string, options: FetchOptions = {}): Promise<CatalogResult> {
   const listed = await fetchModelList(gateway, options);
   if (!listed.ok) return listed;

@@ -1,14 +1,6 @@
 // 边界检查：宿主层不许知道网关报文长什么样。
-//
-// 这条规则来自一个真实的返工：网关把 /v1/models 从 anthropic 渲染换成 openai 渲染时，
-// 生产代码只有 core/catalog.ts 一处要改 —— 但 `hosts/*/fixtures/gateway-v1-models.json`
-// 与 `hosts/dsh/test/check.ts` 里各自存了一份报文，于是三个宿主都得跟着改一遍。
-// 「core 只有一个地方认识网关」这条分层，靠自觉守不住：谁在宿主里写一次 `display_name`，
-// 规则就破一次且没人会发现。所以这里用扫描把它变成会红的检查。
-//
-// 只扫宿主的**生产源码**（*.ts，排除 test/ 与 fixtures/）：
-// 宿主测试通过假网关走的是完整的 fetch → core → ModelSpec 链路，那里的报文是输入数据，
-// 不是宿主对协议的认知。
+// 这条线靠自觉守不住（网关换渲染时宿主测试里各存一份报文，三个宿主都得跟着改），所以用扫描把它变成会红的检查。
+// 只扫宿主的**生产源码**：宿主测试里的报文是输入数据，不是宿主对协议的认知。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -46,12 +38,11 @@ const WRITE_WORDS = [
 ];
 
 /**
- * 把注释剥掉，只留代码。
- *
- * 注释里写「网关的档位字段是 `capabilities.reasoning.effort`」是**解释**，不是越界 ——
- * 宿主作者需要知道自己在映射什么。真正要抓的是把它写进代码去取值。
- * 顺手跳过字符串字面量：URL 里的 `//` 会被当成行注释，那样会把同一行后半段的真实越界藏起来。
- */
+	 * 把注释剥掉，只留代码。
+	 *
+	 * 注释里写「网关的档位字段是 `capabilities.reasoning.effort`」是**解释**，不是越界；要抓的是把它写进代码取值。
+	 * 顺手跳过字符串字面量：URL 里的 `//` 会被当成行注释，那样会把同一行后半段的真实越界藏起来。
+	 */
 function codeOnly(text: string): string {
 	const out: string[] = [];
 	let quote: string | null = null;

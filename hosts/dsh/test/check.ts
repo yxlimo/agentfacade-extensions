@@ -281,7 +281,7 @@ const SEEDED = {
  * 两边一起动是刻意的：防止「改了映射但测试还绿」。
  *
  *
- * api 是 openai-completions（docs/hosts-dsh.md 的实测结论），所以 baseURL 带 /v1。
+ * api 是 openai-completions（docs/design.md 的实测结论），所以 baseURL 带 /v1。
  *
  * reasoningEfforts 按 llm-pi-ai 的**契约**写（不是按我们自己发出去的形状写）：
  *   · dict（不是数组），键是封闭词汇的 dsh 档位，键顺序 = 网关顺序；
@@ -450,7 +450,7 @@ console.log("provider profile（期望值手写）");
 
 {
   const profile = toProviderProfile(SPECS, { baseUrl: GATEWAY, api: DEFAULT_API, apiKeyEnv: DEFAULT_API_KEY_ENV });
-  check("默认方言 openai-completions：baseURL 带 /v1（docs/hosts-dsh.md 的实测结论）", profile.baseURL === `${GATEWAY}/v1`, profile.baseURL);
+  check("默认方言 openai-completions：baseURL 带 /v1（docs/design.md 的实测结论）", profile.baseURL === `${GATEWAY}/v1`, profile.baseURL);
   check("provider profile 与手写快照逐字一致", same(profile, EXPECTED_PROFILE), JSON.stringify(profile));
   // ── 契约断言：按 llm-pi-ai 的真实 schema 断言，而不是按我们自己发出去的形状 ──
   const large = profile.models[0].reasoningEfforts as Record<string, string | null>;

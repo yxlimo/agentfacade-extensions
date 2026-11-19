@@ -1,15 +1,14 @@
-<h1 align="center">AgentFacade Extensions</h1>
+# AgentFacade Extensions
 
-<p align="center">
-  <strong>自动同步 AgentFacade 网关配置的模型。</strong><br>
-  pi · OpenCode · DeepSeek Harness
-</p>
+自动同步 AgentFacade 网关配置的模型。
 
-## What is AgentFacade Extensions?
+支持 pi、OpenCode、DeepSeek Harness。
+
+## 它是什么
 
 把 AgentFacade 网关里配好的模型，同步进你正在用的 agent。网关里加了模型、换了主路由，重启一下就能看见——不用手改 `models.json`，也不用再维护第二份清单。
 
-## Quick start
+## 快速开始
 
 ### pi
 

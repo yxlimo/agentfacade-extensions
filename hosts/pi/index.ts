@@ -2,6 +2,9 @@
 // provider 名独立（agentfacade），不与 models.json 里可能存在的条目撞名；拉不到就不注册，pi 继续用原有清单。
 // 绝不注册空清单：legacy 形式的 models 是替换语义，注册空数组会把用户已有的模型清空。
 
+import os from "node:os";
+
+import { normalizeGatewayInput, writeFacadeConfig } from "../../core/gateway-config.ts";
 import type { FetchOptions } from "../../core/gateway.ts";
 import { syncCatalog, type SyncDeps, type SyncState } from "../../core/sync.ts";
 import { toPiModelEntry, toProviderConfig, type PiModelEntry, type PiProviderConfig } from "./catalog.ts";
@@ -108,14 +111,14 @@ function configFor(state: PluginState, refreshModels: (context: RefreshContext) 
   return { ...toProviderConfig(state.gateway, API_KEY, state.models), refreshModels };
 }
 
-/** 给 /facade-models 用的那几行。英文：用户可见 */
+/** 给 /agentfacade（与别名 /facade-models）用的那几行。英文：用户可见 */
 export function describe(state: PluginState): string[] {
   if (!state.registered) {
     const reason = state.lastError ?? "not registered yet";
     return [
       `AgentFacade provider is NOT registered: ${reason}`,
       `Gateway: ${state.gateway || "(none)"}${state.from ? ` (from ${state.from})` : ""}`,
-      "Fix the gateway address or start the gateway, then run /facade-models refresh",
+      "Fix the gateway address or start the gateway, then run /agentfacade refresh",
     ];
   }
   const when = state.lastRefresh === null ? "never" : new Date(state.lastRefresh).toISOString();
@@ -164,22 +167,74 @@ export default async function facadeModels(pi: PiExtensionApi, options: PluginOp
     warn(`the first fetch was cancelled before it answered — not registering provider "${PROVIDER_NAME}"`);
   }
 
-  pi.registerCommand("facade-models", {
-    description: "Show the AgentFacade gateway model catalog; /facade-models refresh re-fetches it",
-    handler: async (args, ctx) => {
-      if (args.trim().toLowerCase() === "refresh") {
-        const result = await refresh(state, options);
-        if (result.ok) {
-          // 启动之后调用 registerProvider 立刻生效，不用 /reload
-          pi.registerProvider(PROVIDER_NAME, configFor(state, refreshModels));
-          state.registered = true;
-        } else if (!result.cancelled) {
-          warn(`refresh failed (${result.error})`);
-        }
-      }
-      const text = describe(state).join("\n");
-      if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(text, state.registered ? "info" : "warning");
+  /**
+   * connect 的写文件落在 core（writeFacadeConfig）：失败时返回错误而不是抛，
+   * state 一个字段都没被碰 —— 内存里的地址原样保留，这是「写失败不改内存地址」的实现位置。
+   */
+  const connect = async (rawTarget: string, ctx: CommandContext): Promise<void> => {
+    const notify = (text: string): void => {
+      if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(text, "warning");
       else console.log(`${PREFIX} ${text}`);
-    },
+    };
+    const normalized = normalizeGatewayInput(rawTarget);
+    if (!normalized.ok) {
+      notify(`connect: ${normalized.error} — nothing written`);
+      return;
+    }
+    const written = writeFacadeConfig(options.home ?? os.homedir(), normalized.url);
+    if (!written.ok) {
+      notify(`connect: ${written.error} — keeping the current gateway ${state.gateway || "(none)"}`);
+      return;
+    }
+    // 写完立刻刷新一次。拉不到只报告原因、不回滚文件：换网络是正常操作（docs/design.md）
+    const result = await refresh(state, options);
+    if (result.ok) {
+      pi.registerProvider(PROVIDER_NAME, configFor(state, refreshModels));
+      state.registered = true;
+    }
+    const lines = [`connect: gateway written to ${written.file}`, ...describe(state)];
+    if (!result.ok && !result.cancelled) {
+      lines.push(`refresh failed: ${result.error} — the file keeps the new address, retry when the gateway is reachable`);
+    }
+    const text = lines.join("\n");
+    if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(text, state.registered ? "info" : "warning");
+    else console.log(`${PREFIX} ${text}`);
+  };
+
+  const handleCommand = async (args: string, ctx: CommandContext): Promise<void> => {
+    const trimmed = args.trim();
+    if (/^connect\b/i.test(trimmed)) {
+      const target = trimmed.replace(/^connect\b/i, "").trim();
+      if (target === "") {
+        if (typeof ctx?.ui?.notify === "function") ctx.ui.notify("usage: /agentfacade connect <address>", "warning");
+        else console.log(`${PREFIX} usage: /agentfacade connect <address>`);
+        return;
+      }
+      await connect(target, ctx);
+      return;
+    }
+    if (trimmed.toLowerCase() === "refresh") {
+      const result = await refresh(state, options);
+      if (result.ok) {
+        // 启动之后调用 registerProvider 立刻生效，不用 /reload
+        pi.registerProvider(PROVIDER_NAME, configFor(state, refreshModels));
+        state.registered = true;
+      } else if (!result.cancelled) {
+        warn(`refresh failed (${result.error})`);
+      }
+    }
+    const text = describe(state).join("\n");
+    if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(text, state.registered ? "info" : "warning");
+    else console.log(`${PREFIX} ${text}`);
+  };
+
+  pi.registerCommand("agentfacade", {
+    description: "Show the AgentFacade gateway model catalog; /agentfacade connect <address> writes ~/.config/agentfacade/config.json and re-fetches; refresh re-fetches",
+    handler: handleCommand,
+  });
+  // 别名：老名字保留
+  pi.registerCommand("facade-models", {
+    description: "Alias of /agentfacade",
+    handler: handleCommand,
   });
 }

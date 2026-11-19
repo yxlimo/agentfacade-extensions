@@ -366,31 +366,43 @@ check(
 // ── 网关地址解析 ─────────────────────────────────────────────────────────
 
 console.log("");
-console.log("resolveGateway");
+console.log("resolveGateway（优先级：PI_FACADE_GATEWAY → FACADE_GATEWAY → 配置文件 → 旧路径 → 默认）");
 
 const home = tempHome();
+fs.mkdirSync(path.join(home, ".config", "agentfacade"), { recursive: true });
+fs.writeFileSync(path.join(home, ".config", "agentfacade", "config.json"), '{"gateway":"http://new-config.example:6450"}');
 fs.mkdirSync(path.join(home, ".config", "buddy-helper"), { recursive: true });
 fs.writeFileSync(path.join(home, ".config", "buddy-helper", "config.json"), '{"gateway":"http://from-config.example:6450/"}');
 
 const both = resolveGateway({ PI_FACADE_GATEWAY: "http://pi.example:6450", FACADE_GATEWAY: "http://facade.example:6450" }, home);
 check(
-  "PI_FACADE_GATEWAY 赢过 FACADE_GATEWAY 与配置文件",
+  "PI_FACADE_GATEWAY 赢过其它所有级（值与 from 都能和别的级区分）",
   both.ok && both.gateway === "http://pi.example:6450" && both.from === "PI_FACADE_GATEWAY",
   JSON.stringify(both),
 );
 
 const facade = resolveGateway({ FACADE_GATEWAY: "http://facade.example:6450" }, home);
 check(
-  "没有 PI_FACADE_GATEWAY 时 FACADE_GATEWAY 赢过配置文件",
+  "没有 PI_FACADE_GATEWAY 时 FACADE_GATEWAY 赢过两级配置文件",
   facade.ok && facade.gateway === "http://facade.example:6450" && facade.from === "FACADE_GATEWAY",
   JSON.stringify(facade),
 );
 
 const fromFile = resolveGateway({}, home);
 check(
-  "都没有时读 ~/.config/buddy-helper/config.json 的 gateway，并去掉末尾斜杠",
-  fromFile.ok && fromFile.gateway === "http://from-config.example:6450" && fromFile.from === "config file",
+  "环境变量都空 → 读 ~/.config/agentfacade/config.json（三个 agent 共用那份）",
+  fromFile.ok && fromFile.gateway === "http://new-config.example:6450" && fromFile.from === "config file",
   JSON.stringify(fromFile),
+);
+
+const legacyHome = tempHome();
+fs.mkdirSync(path.join(legacyHome, ".config", "buddy-helper"), { recursive: true });
+fs.writeFileSync(path.join(legacyHome, ".config", "buddy-helper", "config.json"), '{"gateway":"http://from-config.example:6450/"}');
+const fromLegacy = resolveGateway({}, legacyHome);
+check(
+  "只有旧路径 → 读 buddy-helper，from 是 legacy config file，末尾斜杠去掉",
+  fromLegacy.ok && fromLegacy.gateway === "http://from-config.example:6450" && fromLegacy.from === "legacy config file",
+  JSON.stringify(fromLegacy),
 );
 
 const emptyHome = tempHome();
@@ -404,15 +416,31 @@ check(
 const badScheme = resolveGateway({ PI_FACADE_GATEWAY: "ftp://nope" }, emptyHome);
 check("不是 http(s) 地址 → 报错而不是拿去请求", !badScheme.ok && badScheme.error.includes("http(s)"), JSON.stringify(badScheme));
 
+// 自己的那份严格：坏文件与坏类型都报错；旧文件宽容：坏文件当没配 —— 两条分开钉，别被「顺手统一」
 const brokenConfigHome = tempHome();
-fs.mkdirSync(path.join(brokenConfigHome, ".config", "buddy-helper"), { recursive: true });
-fs.writeFileSync(path.join(brokenConfigHome, ".config", "buddy-helper", "config.json"), "{ not json");
+fs.mkdirSync(path.join(brokenConfigHome, ".config", "agentfacade"), { recursive: true });
+fs.writeFileSync(path.join(brokenConfigHome, ".config", "agentfacade", "config.json"), "{ not json");
+const broken = resolveGateway({}, brokenConfigHome);
 check(
-  "配置文件坏了 → 当成没配，退到默认网关",
-  resolveGateway({}, brokenConfigHome).ok,
-  JSON.stringify(resolveGateway({}, brokenConfigHome)),
+  "自己的配置文件 JSON 坏 → 报错带文件路径与原因，不悄悄退默认",
+  !broken.ok && broken.error.includes("agentfacade/config.json") && broken.error.includes("not valid JSON"),
+  JSON.stringify(broken),
 );
 
+const wrongTypeHome = tempHome();
+fs.mkdirSync(path.join(wrongTypeHome, ".config", "agentfacade"), { recursive: true });
+fs.writeFileSync(path.join(wrongTypeHome, ".config", "agentfacade", "config.json"), '{"gateway":42}');
+const wrongType = resolveGateway({}, wrongTypeHome);
+check("gateway 不是字符串 → 报错带实际值", !wrongType.ok && wrongType.error.includes('"gateway"') && wrongType.error.includes("42"), JSON.stringify(wrongType));
+
+const brokenLegacyHome = tempHome();
+fs.mkdirSync(path.join(brokenLegacyHome, ".config", "buddy-helper"), { recursive: true });
+fs.writeFileSync(path.join(brokenLegacyHome, ".config", "buddy-helper", "config.json"), "{ not json");
+check(
+  "旧配置文件坏了 → 当成没配，退到默认网关（历史行为，与新文件不同）",
+  resolveGateway({}, brokenLegacyHome).ok,
+  JSON.stringify(resolveGateway({}, brokenLegacyHome)),
+);
 // 方言（query）是 core 的事：这里只钉「清单走的是根路径下的 /v1/models」
 check(
   "模型清单地址的路径是根路径下的 /v1/models",
@@ -429,17 +457,22 @@ console.log("真实网络（127.0.0.1 的假网关，真的 fetch）");
 interface Captured {
   provider: { name: string; config: PiProviderConfig & { refreshModels?: RefreshModels } } | null;
   command: { name: string; handler: (args: string, ctx: unknown) => Promise<void> } | null;
+  /** /agentfacade 与别名 /facade-models 各注册一条；command 保留最后一条，旧用例不用改 */
+  commands: Array<{ name: string; handler: (args: string, ctx: unknown) => Promise<void> }>;
 }
 
 function fakePi(): PiExtensionApi & Captured {
   const captured: PiExtensionApi & Captured = {
     provider: null,
     command: null,
+    commands: [],
     registerProvider(name, config) {
       captured.provider = { name, config };
     },
     registerCommand(name, options) {
-      captured.command = { name, handler: options.handler as (args: string, ctx: unknown) => Promise<void> };
+      const entry = { name, handler: options.handler as (args: string, ctx: unknown) => Promise<void> };
+      captured.commands.push(entry);
+      captured.command = entry;
     },
   } as PiExtensionApi & Captured;
   return captured;
@@ -738,7 +771,7 @@ console.log("refreshModels 与 /facade-models");
 {
   const state = { gateway: "", from: "", models: [], lastRefresh: null, lastError: "boom", registered: false };
   const lines = describe(state).join("\n");
-  check("未注册时 describe 说 NOT registered 并给下一步", lines.includes("NOT registered") && lines.includes("/facade-models refresh"), lines);
+  check("未注册时 describe 说 NOT registered 并给下一步", lines.includes("NOT registered") && lines.includes("/agentfacade refresh"), lines);
 
   const okState = { gateway: "http://gw.example:6450", from: "config file", models: [toPiModelEntry(spec({ id: "a" }))], lastRefresh: Date.now(), lastError: null, registered: true };
   check("已注册时 describe 报模型数与网关", describe(okState).join("\n").includes("1 registered"), describe(okState).join("\n"));
@@ -761,6 +794,110 @@ console.log("refreshModels 与 /facade-models");
   check("取消时不动 lastError", state.lastError === null, JSON.stringify(state.lastError));
   await live.close();
 }
+// ── /agentfacade 与 /agentfacade connect ────────────────────────────────
+
+console.log("");
+console.log("/agentfacade 与 /agentfacade connect");
+
+{
+  const live = await startFakeUpstream((req) => (isModelsPath(req.url) ? { body: LISTED } : undefined));
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: live.url }, tempHome());
+  await facadeModels(pi, options);
+  check(
+    "注册了 /agentfacade 与别名 /facade-models，同一个 handler",
+    same(pi.commands.map((c) => c.name), ["agentfacade", "facade-models"]) && pi.commands[0].handler === pi.commands[1].handler,
+    JSON.stringify(pi.commands.map((c) => c.name)),
+  );
+
+  // 归一化：不带 scheme 的地址写进配置文件的是补全后的形式
+  const home = options.home!;
+  const seen: string[] = [];
+  await pi.command!.handler("connect 192.168.1.9", { ui: { notify: (t: string) => seen.push(t) } });
+  const file = path.join(home, ".config", "agentfacade", "config.json");
+  check(
+    "connect 把归一化后的地址写进 ~/.config/agentfacade/config.json",
+    fs.readFileSync(file, "utf8") === '{\n  "gateway": "http://192.168.1.9:6450"\n}\n',
+    JSON.stringify(fs.readFileSync(file, "utf8")),
+  );
+  check("connect 报告写到了哪个文件", seen.join("\n").includes("gateway written to") && seen.join("\n").includes("config.json"), seen.join("\n"));
+  check("connect 报告写到了哪个文件", seen.join("\n").includes("gateway written to") && seen.join("\n").includes("config.json"), seen.join("\n"));
+  // env 变量还设着：优先级高于配置文件，所以刷新显示的来源仍是 env 这一级 —— 文件静静等 env 清掉的那天
+  check(
+    "写完刷新显示当前地址与来源（env 还设着，所以地址与来源都还是 env 那个）",
+    seen.join("\n").includes(live.url) && seen.join("\n").includes("(from PI_FACADE_GATEWAY)"),
+    seen.join("\n"),
+  );
+  await live.close();
+}
+
+{
+  // connect 的核心闭环：启动时踩默认地址没注册，connect 到一个活的网关后立即刷新并补注册
+  const live = await startFakeUpstream((req) => (isModelsPath(req.url) ? { body: LISTED } : undefined));
+  // 路由型假 fetch：打到 connect 写入的那个地址才回清单，其它（默认地址）一律拒绝
+  const routed = (async (input: unknown) => {
+    const url = String(input);
+    if (new URL(url).origin === live.url) {
+      return new Response(JSON.stringify(LISTED), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error("connect ECONNREFUSED");
+  }) as unknown as typeof fetch;
+  const { pi, options } = runFactory({}, tempHome(), { fetchOptions: { fetchImpl: routed } });
+  await facadeModels(pi, options);
+  check("（前置）启动时默认地址不可达，没有注册", pi.provider === null, JSON.stringify(pi.provider));
+
+  const seen: string[] = [];
+  await pi.command!.handler(`connect ${live.url}`, { ui: { notify: (t: string) => seen.push(t) } });
+  check(
+    "connect 写入的文件就是刷新用的地址：立即补注册了 provider",
+    pi.provider?.name === "agentfacade" && pi.provider.config.baseUrl === live.url,
+    JSON.stringify({ provider: pi.provider?.name, baseUrl: pi.provider?.config.baseUrl }),
+  );
+  check("补注册后模型数等于 /v1/models 的 data 长度", pi.provider?.config.models.length === LISTED.data.length, String(pi.provider?.config.models.length));
+  check("刷新输出说明地址来自 config file 一级", seen.join("\n").includes("(from config file)"), seen.join("\n"));
+  await live.close();
+}
+
+{
+  // 写失败：home 的 .config 被普通文件挡住。报错且内存里的地址原样不动
+  const live = await startFakeUpstream((req) => (isModelsPath(req.url) ? { body: LISTED } : undefined));
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: live.url }, tempHome());
+  await facadeModels(pi, options);
+  const home = options.home!;
+  fs.writeFileSync(path.join(home, ".config"), "not a directory");
+
+  const seen: string[] = [];
+  await pi.command!.handler("connect 192.168.1.9", { ui: { notify: (t: string) => seen.push(t) } });
+  check("写失败时报告原因（cannot write）", seen.join("\n").includes("cannot write"), seen.join("\n"));
+  check("写失败时不报「written to」", !seen.join("\n").includes("gateway written to"), seen.join("\n"));
+
+  seen.length = 0;
+  await pi.command!.handler("", { ui: { notify: (t: string) => seen.push(t) } });
+  check(
+    "写失败后内存里的地址不变：还是 env 那个（不是 connect 想写的那个）",
+    seen.join("\n").includes(live.url) && seen.join("\n").includes("PI_FACADE_GATEWAY") && !seen.join("\n").includes("192.168.1.9"),
+    seen.join("\n"),
+  );
+  await live.close();
+}
+
+{
+  // 归一化拒绝的地址：报错、不写文件、不刷新
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: "http://ok.example:6450" }, tempHome());
+  await facadeModels(pi, options);
+  const seen: string[] = [];
+  await pi.command!.handler("connect ftp://nope", { ui: { notify: (t: string) => seen.push(t) } });
+  check("非 http(s) → 报错点名原因并说明什么都没写", seen.join("\n").includes("only http(s)") && seen.join("\n").includes("nothing written"), seen.join("\n"));
+  check(
+    "拒绝时配置文件不存在",
+    fs.existsSync(path.join(options.home!, ".config", "agentfacade", "config.json")) === false,
+    String(fs.existsSync(path.join(options.home!, ".config", "agentfacade"))),
+  );
+
+  seen.length = 0;
+  await pi.command!.handler("connect", { ui: { notify: (t: string) => seen.push(t) } });
+  check("connect 不带地址 → 提示用法", seen.join("\n").includes("usage:"), seen.join("\n"));
+}
+
 
 console.log("");
 console.log(fail === 0 ? `全部通过（${pass} 条）` : `${fail} 条失败，${pass} 条通过`);

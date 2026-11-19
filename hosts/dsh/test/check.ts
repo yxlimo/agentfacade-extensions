@@ -16,6 +16,7 @@
 // 断言用的是「注入的配置对象逐字比较」（快照式）：只断言 typeof 的用例什么也钉不住。
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -792,22 +793,62 @@ console.log("agent 没有可用的写入 API");
   check("ctx 没有 settings：失败并说明", r3.ok === false && !r3.ok && r3.error.includes("no settings service"), r3.ok ? "" : r3.error);
 }
 
-// ── 13. 地址解析（dsh 侧的三级）────────────────────────────────────────
+// ── 13. 地址解析（插件配置 → 环境变量 → 共用配置文件 → 默认） ────────────
 
 console.log("resolveDshGateway");
 
+/** 临时主目录：配置文件那两级从这里读，绝不读真实 ~/.config */
+function tempHome(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "dsh-models-home-"));
+}
+
+function seedConfigAt(home: string, dir: string, body: string): void {
+  fs.mkdirSync(path.join(home, ".config", dir), { recursive: true });
+  fs.writeFileSync(path.join(home, ".config", dir, "config.json"), body);
+}
+
 {
-  const fromConfig = resolveDshGateway({ gateway: "http://cfg:6450", env: { DSH_FACADE_GATEWAY: "http://env:1" } });
+  const fromConfig = resolveDshGateway({ gateway: "http://cfg:6450", env: { DSH_FACADE_GATEWAY: "http://env:1" }, home: tempHome() });
   check("插件配置最高优先", fromConfig.ok && fromConfig.from === "plugin config" && fromConfig.gateway === "http://cfg:6450");
 
-  const fromEnv = resolveDshGateway({ env: { DSH_FACADE_GATEWAY: "http://env:1", FACADE_GATEWAY: "http://facade:2" } });
+  const fromEnv = resolveDshGateway({ env: { DSH_FACADE_GATEWAY: "http://env:1", FACADE_GATEWAY: "http://facade:2" }, home: tempHome() });
   check("其次 DSH_FACADE_GATEWAY", fromEnv.ok && fromEnv.from === "DSH_FACADE_GATEWAY" && fromEnv.gateway === "http://env:1");
 
-  const fromFallback = resolveDshGateway({ env: {} });
+  const fromFacade = resolveDshGateway({ env: { FACADE_GATEWAY: "http://facade:2" }, home: tempHome() });
+  check("没有自己的变量时落到共用的 FACADE_GATEWAY", fromFacade.ok && fromFacade.from === "FACADE_GATEWAY" && fromFacade.gateway === "http://facade:2");
+
+  const sharedHome = tempHome();
+  seedConfigAt(sharedHome, "agentfacade", '{"gateway":"http://shared-config.example:6450"}');
+  const fromSharedConfig = resolveDshGateway({ env: {}, home: sharedHome });
+  check(
+    "环境变量都空 → 读 ~/.config/agentfacade/config.json（三个 agent 共用那份，connect 写的就是它）",
+    fromSharedConfig.ok && fromSharedConfig.gateway === "http://shared-config.example:6450" && fromSharedConfig.from === "config file",
+    JSON.stringify(fromSharedConfig),
+  );
+
+  const legacyHome = tempHome();
+  seedConfigAt(legacyHome, "buddy-helper", '{"gateway":"http://legacy.example:6450/"}');
+  const fromLegacy = resolveDshGateway({ env: {}, home: legacyHome });
+  check(
+    "只有旧路径 → 读 buddy-helper，from 是 legacy config file，末尾斜杠去掉",
+    fromLegacy.ok && fromLegacy.gateway === "http://legacy.example:6450" && fromLegacy.from === "legacy config file",
+    JSON.stringify(fromLegacy),
+  );
+
+  const brokenHome = tempHome();
+  seedConfigAt(brokenHome, "agentfacade", "{ not json");
+  const broken = resolveDshGateway({ env: {}, home: brokenHome });
+  check(
+    "共用配置文件 JSON 坏 → 报错带文件路径，不悄悄换成默认值",
+    !broken.ok && broken.error.includes("agentfacade/config.json") && broken.error.includes("not valid JSON"),
+    JSON.stringify(broken),
+  );
+
+  const fromFallback = resolveDshGateway({ env: {}, home: tempHome() });
   check("都没有时用默认地址", fromFallback.ok && fromFallback.from === "default" && fromFallback.gateway === DEFAULT_GATEWAY);
 
-  const broken = resolveDshGateway({ env: { DSH_FACADE_GATEWAY: "not-a-url" } });
-  check("写错的地址：报错，不悄悄换成默认值", !broken.ok && broken.error.includes("not an http(s) URL"));
+  const badEnv = resolveDshGateway({ env: { DSH_FACADE_GATEWAY: "not-a-url" }, home: tempHome() });
+  check("写错的地址：报错，不悄悄换成默认值", !badEnv.ok && badEnv.error.includes("not an http(s) URL"));
 
   check("启动等待预算是 2 秒（启动路径上被 await）", DEFAULT_TIMEOUT_MS === 2000);
 }

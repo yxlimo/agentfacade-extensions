@@ -9,6 +9,7 @@
 // 那种断言在映射改坏以后照样绿，什么也没钉住。
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,6 +31,12 @@ import {
   modelsUrl,
   resolveGateway,
 } from "../gateway.ts";
+import {
+  DEFAULT_GATEWAY,
+  normalizeGatewayInput,
+  resolveFacadeGateway,
+  writeFacadeConfig,
+} from "../gateway-config.ts";
 import { syncCatalog, type SyncDeps, type SyncState } from "../sync.ts";
 import type { HostAdapter, ModelSpec } from "../types.ts";
 
@@ -466,7 +473,7 @@ check(
   same(
     resolveGateway({
       candidates: [{ from: "FIRST", value: "" }],
-      config: { label: "config file", read: () => "http://from-config.example:6450/" },
+      config: { label: "config file", read: () => ({ value: "http://from-config.example:6450/" }) },
       fallback: "http://fallback.example:6450",
     }),
     { ok: true, gateway: "http://from-config.example:6450", from: "config file" },
@@ -474,7 +481,7 @@ check(
   JSON.stringify(
     resolveGateway({
       candidates: [{ from: "FIRST", value: "" }],
-      config: { label: "config file", read: () => "http://from-config.example:6450/" },
+      config: { label: "config file", read: () => ({ value: "http://from-config.example:6450/" }) },
       fallback: "http://fallback.example:6450",
     }),
   ),
@@ -485,7 +492,7 @@ check(
   same(
     resolveGateway({
       candidates: [],
-      config: { label: "config file", read: () => "file:///etc/passwd" },
+      config: { label: "config file", read: () => ({ value: "file:///etc/passwd" }) },
       fallback: "http://fallback.example:6450",
     }),
     { ok: false, error: "config file gateway is not an http(s) URL: file:///etc/passwd" },
@@ -493,7 +500,7 @@ check(
   JSON.stringify(
     resolveGateway({
       candidates: [],
-      config: { label: "config file", read: () => "file:///etc/passwd" },
+      config: { label: "config file", read: () => ({ value: "file:///etc/passwd" }) },
       fallback: "http://fallback.example:6450",
     }),
   ),
@@ -509,6 +516,253 @@ check(
   JSON.stringify(resolveGateway({ candidates: [{ from: "FIRST", value: "" }], fallback: "http://fb.example:6450" })),
 );
 
+
+check(
+  "多级配置按顺序问：第一级赢了就不到第二级",
+  same(
+    resolveGateway({
+      candidates: [],
+      config: [
+        { label: "config file", read: () => ({ value: "http://first.example:6450" }) },
+        { label: "legacy config file", read: () => ({ value: "http://legacy.example:6450" }) },
+      ],
+      fallback: "http://fallback.example:6450",
+    }),
+    { ok: true, gateway: "http://first.example:6450", from: "config file" },
+  ),
+  JSON.stringify(
+    resolveGateway({
+      candidates: [],
+      config: [
+        { label: "config file", read: () => ({ value: "http://first.example:6450" }) },
+        { label: "legacy config file", read: () => ({ value: "http://legacy.example:6450" }) },
+      ],
+      fallback: "http://fallback.example:6450",
+    }),
+  ),
+);
+
+check(
+  "第一级坏了立刻报错，错误原样透传 —— 不退到下一级（坏文件是显式配置，不是「没配」）",
+  same(
+    resolveGateway({
+      candidates: [],
+      config: [
+        { label: "config file", read: () => ({ error: "config.json is not valid JSON: boom" }) },
+        { label: "legacy config file", read: () => ({ value: "http://legacy.example:6450" }) },
+      ],
+      fallback: "http://fallback.example:6450",
+    }),
+    { ok: false, error: "config.json is not valid JSON: boom" },
+  ),
+  JSON.stringify(
+    resolveGateway({
+      candidates: [],
+      config: [
+        { label: "config file", read: () => ({ error: "config.json is not valid JSON: boom" }) },
+        { label: "legacy config file", read: () => ({ value: "http://legacy.example:6450" }) },
+      ],
+      fallback: "http://fallback.example:6450",
+    }),
+  ),
+);
+
+console.log("");
+console.log("normalizeGatewayInput（/agentfacade connect 的输入）");
+
+check(
+  "没有 scheme 没有端口 → 补 http:// 与 :6450（README 的第一种输入）",
+  same(normalizeGatewayInput("192.168.1.9"), { ok: true, url: "http://192.168.1.9:6450" }),
+  JSON.stringify(normalizeGatewayInput("192.168.1.9")),
+);
+check(
+  "没有 scheme 有端口 → 只补 http://，端口原样（README 的第二种输入）",
+  same(normalizeGatewayInput("192.168.1.9:8000"), { ok: true, url: "http://192.168.1.9:8000" }),
+  JSON.stringify(normalizeGatewayInput("192.168.1.9:8000")),
+);
+check(
+  "https 不补端口（443 是它自己的默认；README 的第三种输入）",
+  same(normalizeGatewayInput("https://gw.example"), { ok: true, url: "https://gw.example" }),
+  JSON.stringify(normalizeGatewayInput("https://gw.example")),
+);
+check(
+  "末尾斜杠去掉；http 没写端口时补 :6450 一起发生",
+  same(normalizeGatewayInput("http://gw.example/"), { ok: true, url: "http://gw.example:6450" }),
+  JSON.stringify(normalizeGatewayInput("http://gw.example/")),
+);
+check(
+  "前后空白 trim 掉",
+  same(normalizeGatewayInput("  192.168.1.9  "), { ok: true, url: "http://192.168.1.9:6450" }),
+  JSON.stringify(normalizeGatewayInput("  192.168.1.9  ")),
+);
+check(
+  "带路径的地址：路径保留、末尾斜杠去掉，端口照补",
+  normalizeGatewayInput("192.168.1.9/base/").ok &&
+    (normalizeGatewayInput("192.168.1.9/base/") as { ok: true; url: string }).url === "http://192.168.1.9:6450/base",
+  JSON.stringify(normalizeGatewayInput("192.168.1.9/base/")),
+);
+check(
+  "http://x:80 的显式端口不算「没写」：URL 会把默认端口吞掉，靠原文本判定，补 :6450 就是静默改地址",
+  same(normalizeGatewayInput("http://gw.example:80"), { ok: true, url: "http://gw.example:80" }),
+  JSON.stringify(normalizeGatewayInput("http://gw.example:80")),
+);
+const refusedScheme = normalizeGatewayInput("ftp://nope");
+check(
+  "非 http(s) → 报错，不猜测",
+  !refusedScheme.ok && refusedScheme.error.includes("only http(s)"),
+  JSON.stringify(refusedScheme),
+);
+const junk = normalizeGatewayInput("not a url");
+check(
+  "解析失败（空 host）→ 报错",
+  !junk.ok && junk.error.includes("not a URL"),
+  JSON.stringify(junk),
+);
+const emptyInput = normalizeGatewayInput("   ");
+check(
+  "空串 → 报错",
+  !emptyInput.ok && emptyInput.error.includes("empty"),
+  JSON.stringify(emptyInput),
+);
+check(
+  "file:// 之类一律拒绝",
+  !normalizeGatewayInput("file:///etc/passwd").ok,
+  JSON.stringify(normalizeGatewayInput("file:///etc/passwd")),
+);
+
+console.log("");
+console.log("配置文件 ~/.config/agentfacade/config.json 与共用解析链（home 注入临时目录）");
+
+function tempHome(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "facade-config-home-"));
+}
+
+/** 造一份我们自己的配置文件；返回完整路径 */
+function seedConfig(home: string, body: string): string {
+  const dir = path.join(home, ".config", "agentfacade");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, "config.json");
+  fs.writeFileSync(file, body);
+  return file;
+}
+
+const CHAIN_ENV_NAMES = ["TEST_AGENT_GATEWAY", "TEST_SHARED_GATEWAY"];
+
+{
+  // 写入 → 读回：整条链闭环。文件形状逐字钉住，别让 {"gateway":...} 悄悄长出别的键
+  const home = tempHome();
+  const written = writeFacadeConfig(home, "http://192.168.1.9:6450");
+  const file = path.join(home, ".config", "agentfacade", "config.json");
+  check("写成功并返回文件路径", written.ok && written.file === file, JSON.stringify(written));
+  check(
+    "文件内容逐字：两格缩进、只有 gateway 一格，加一个换行",
+    fs.readFileSync(file, "utf8") === '{\n  "gateway": "http://192.168.1.9:6450"\n}\n',
+    JSON.stringify(fs.readFileSync(file, "utf8")),
+  );
+  check("文件权限是 0600（里面有用户自己的网关地址）", (fs.statSync(file).mode & 0o777) === 0o600, (fs.statSync(file).mode & 0o777).toString(8));
+  check("写入后的地址被解析链读回来，from 是 config file", same(resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home }), { ok: true, gateway: "http://192.168.1.9:6450", from: "config file" }), JSON.stringify(resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home })));
+}
+
+{
+  // 原子性 observable 的一半：覆盖写不留临时文件，内容被替换
+  const home = tempHome();
+  writeFacadeConfig(home, "http://first.example:6450");
+  const again = writeFacadeConfig(home, "http://second.example:6450");
+  const dir = path.join(home, ".config", "agentfacade");
+  check("覆盖写成功", again.ok, JSON.stringify(again));
+  check("覆盖写后内容是新的", fs.readFileSync(path.join(dir, "config.json"), "utf8").includes("second.example"), fs.readFileSync(path.join(dir, "config.json"), "utf8"));
+  check("目录里没有残留的临时文件（rename 用掉了它）", fs.readdirSync(dir).every((name) => name === "config.json"), JSON.stringify(fs.readdirSync(dir)));
+}
+
+{
+  // 写入守卫：非 http(s) 一律拒绝且不落盘 —— docs/design.md 的 connect 规则
+  const home = tempHome();
+  const refused = writeFacadeConfig(home, "file:///etc/passwd");
+  check("拒绝把非 http(s) 地址写进配置文件", !refused.ok && refused.error.includes("refusing"), JSON.stringify(refused));
+  check("拒绝时什么都没写出来", fs.existsSync(path.join(home, ".config", "agentfacade")) === false, String(fs.existsSync(path.join(home, ".config", "agentfacade"))));
+}
+
+{
+  // 写失败：路径被普通文件挡住。错误带原因返回，不抛 —— 调用方（connect）据此保持内存地址不动
+  const home = tempHome();
+  fs.writeFileSync(path.join(home, ".config"), "not a directory");
+  const blocked = writeFacadeConfig(home, "http://192.168.1.9:6450");
+  check("目录建不出来 → 写失败并带原因", !blocked.ok && blocked.error.includes("cannot write"), JSON.stringify(blocked));
+}
+
+{
+  // 优先级从高到低，每一级互相能区分（值不同、from 也不同）
+  const home = tempHome();
+  seedConfig(home, '{"gateway":"http://new-config.example:6450"}');
+  const legacyDir = path.join(home, ".config", "buddy-helper");
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.writeFileSync(path.join(legacyDir, "config.json"), '{"gateway":"http://legacy.example:6450/"}');
+
+  const own = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: { TEST_AGENT_GATEWAY: "http://agent.example:6450", TEST_SHARED_GATEWAY: "http://shared.example:6450" }, home });
+  check("agent 自己的环境变量最高", same(own, { ok: true, gateway: "http://agent.example:6450", from: "TEST_AGENT_GATEWAY" }), JSON.stringify(own));
+
+  const shared = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: { TEST_AGENT_GATEWAY: " ", TEST_SHARED_GATEWAY: "http://shared.example:6450" }, home });
+  check("自己的变量空白算没配，落到共用变量", same(shared, { ok: true, gateway: "http://shared.example:6450", from: "TEST_SHARED_GATEWAY" }), JSON.stringify(shared));
+
+  const fromConfig = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home });
+  check("环境变量都空 → 新配置文件，from 是 config file", same(fromConfig, { ok: true, gateway: "http://new-config.example:6450", from: "config file" }), JSON.stringify(fromConfig));
+
+  const legacyOnly = tempHome();
+  fs.mkdirSync(path.join(legacyOnly, ".config", "buddy-helper"), { recursive: true });
+  fs.writeFileSync(path.join(legacyOnly, ".config", "buddy-helper", "config.json"), '{"gateway":"http://legacy.example:6450/"}');
+  const onlyLegacy = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home: legacyOnly });
+  check("只有旧路径 → 读它，from 是 legacy config file，末尾斜杠去掉", same(onlyLegacy, { ok: true, gateway: "http://legacy.example:6450", from: "legacy config file" }), JSON.stringify(onlyLegacy));
+}
+
+{
+  const nowhere = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home: tempHome() });
+  check("哪里都没配 → 默认地址（README 的默认值），from 是 default", same(nowhere, { ok: true, gateway: DEFAULT_GATEWAY, from: "default" }), JSON.stringify(nowhere));
+  check("默认地址就是 http://127.0.0.1:6450", DEFAULT_GATEWAY === "http://127.0.0.1:6450", DEFAULT_GATEWAY);
+}
+
+{
+  // 显式写错的地址必须报错：环境变量、新配置文件、旧配置文件三处各一条
+  const badEnv = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: { TEST_AGENT_GATEWAY: "ftp://nope" }, home: tempHome() });
+  check("环境变量里的坏地址 → 报错点名变量，不退默认", !badEnv.ok && badEnv.error.includes("TEST_AGENT_GATEWAY") && badEnv.error.includes("http(s)"), JSON.stringify(badEnv));
+
+  const brokenHome = tempHome();
+  seedConfig(brokenHome, "{ not json");
+  const broken = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home: brokenHome });
+  check(
+    "新配置文件 JSON 坏 → 报错带文件路径与原因（不是当成没配置退默认）",
+    !broken.ok && broken.error.includes("agentfacade/config.json") && broken.error.includes("not valid JSON"),
+    JSON.stringify(broken),
+  );
+
+  const wrongTypeHome = tempHome();
+  seedConfig(wrongTypeHome, '{"gateway":42}');
+  const wrongType = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home: wrongTypeHome });
+  check(
+    "gateway 不是字符串 → 报错带实际类型",
+    !wrongType.ok && wrongType.error.includes('"gateway"') && wrongType.error.includes("42"),
+    JSON.stringify(wrongType),
+  );
+
+  const badAddressHome = tempHome();
+  seedConfig(badAddressHome, '{"gateway":"ftp://nope"}');
+  const badAddress = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home: badAddressHome });
+  check("配置文件里的地址不是 http(s) → 报错，from 不会变成 default", !badAddress.ok && badAddress.error.includes("http(s) URL: ftp://nope"), JSON.stringify(badAddress));
+}
+
+{
+  // 旧文件的宽容是历史行为：坏了当没配。与新文件的严格分开钉，别让谁「顺手统一」
+  const legacyBroken = tempHome();
+  fs.mkdirSync(path.join(legacyBroken, ".config", "buddy-helper"), { recursive: true });
+  fs.writeFileSync(path.join(legacyBroken, ".config", "buddy-helper", "config.json"), "{ not json");
+  const fallback = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home: legacyBroken });
+  check("旧配置文件 JSON 坏 → 当没配退默认（历史行为，与新文件不同）", same(fallback, { ok: true, gateway: DEFAULT_GATEWAY, from: "default" }), JSON.stringify(fallback));
+
+  const legacyBadAddress = tempHome();
+  fs.mkdirSync(path.join(legacyBadAddress, ".config", "buddy-helper"), { recursive: true });
+  fs.writeFileSync(path.join(legacyBadAddress, ".config", "buddy-helper", "config.json"), '{"gateway":"ftp://nope"}');
+  const bad = resolveFacadeGateway({ envVarNames: CHAIN_ENV_NAMES, env: {}, home: legacyBadAddress });
+  check("旧配置文件里的坏地址仍报错（地址是显式配置，坏文件不是）", !bad.ok && bad.error.includes("http(s) URL: ftp://nope"), JSON.stringify(bad));
+}
 check(
   "清单地址锁定 openai 方言（不依赖网关那边的默认值）",
   modelsUrl("http://gw.example:6450") === `http://gw.example:6450/v1/models?dialect=${MODELS_DIALECT}` &&
@@ -958,21 +1212,28 @@ console.log("core 的归属规则（禁用词扫描）");
   // capabilities.tools），catalog.ts 必须读它；但它出现在别的 core 文件里、或以 `capabilities:` 的
   // key 位置出现，就说明 agent 的形状漏进了契约。下面那条 key 位置断言是这条口子的补偿。
   const PAYLOAD_ONLY = "capabilities";
-  const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts"];
+  const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts", "gateway-config.ts"];
   const hits: string[] = [];
   const keyHits: string[] = [];
   for (const file of files) {
     const text = fs.readFileSync(path.join(CORE_DIR, file), "utf8");
     for (const word of FORBIDDEN) {
+      // gateway-config.ts 里的 "agentfacade" 只允许出现在配置文件路径（~/.config/agentfacade/config.json）
+      // —— 那是工具链自己的目录名。豁免判定按行：该行必须同时提到 config.json，出现在别处照样算越界
+      if (word === "agentfacade" && file === "gateway-config.ts") {
+        const offender = text.split("\n").find((line) => line.includes("agentfacade") && !line.includes("config.json"));
+        if (offender !== undefined) hits.push(`${file}: agentfacade outside the config path`);
+        continue;
+      }
       if (text.includes(word)) hits.push(`${file}: ${word}`);
     }
     if (file !== "catalog.ts" && text.includes(PAYLOAD_ONLY)) hits.push(`${file}: ${PAYLOAD_ONLY}`);
     if (/(^|[\s,{])capabilities\s*:/m.test(text)) keyHits.push(file);
   }
-  check("core 的四个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
+  check("core 的五个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
   check("capabilities 只在读报文的位置，没变成我们自己的字段名", keyHits.length === 0, JSON.stringify(keyHits));
   check(
-    "扫描确实读到了四个源文件（不然上一行永远绿）",
+    "扫描确实读到了五个源文件（不然上一行永远绿）",
     files.every((file) => fs.existsSync(path.join(CORE_DIR, file))),
     JSON.stringify(files),
   );

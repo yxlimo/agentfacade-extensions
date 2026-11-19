@@ -14,19 +14,25 @@ export interface GatewayCandidate {
   readonly value: string;
 }
 
+/**
+ * 一级配置读取的结果。`value` 空串 = 这一级没配（没有文件、没有这个键都算）；
+ * `error` = 配置坏了（JSON 坏、类型不对）：报错，**不**悄悄退到下一级 ——
+ * 文件里写错的地址与写坏的文件一样，都是用户显式留下的，吞掉只会让人以为配置生效了。
+ */
+export type GatewayConfigRead = { value: string } | { error: string };
+
 /** 候选都没配时问它。core 只拿到「读」，不拿到路径 —— 配置文件属于 agent/工具链 */
 export interface GatewayConfigSource {
-  /** 报错与来源里怎么称呼它 */
+  /** 报错与来源里怎么称呼它；会原样进 ResolvedGateway 的 from */
   readonly label: string;
-  /** 读出来的地址；空串表示没配（没有文件、文件坏了、没有这个键都算没配） */
-  read(): string;
+  read(): GatewayConfigRead;
 }
 
 export interface ResolveGatewayOptions {
   /** 按优先级从高到低 */
   readonly candidates: readonly GatewayCandidate[];
-  readonly config?: GatewayConfigSource;
-  /** 哪里都没配时用的地址（调用方的默认值） */
+  /** 一级或多级配置文件，按优先级从高到低；某级坏了直接报错，不退到下一级 */
+  readonly config?: GatewayConfigSource | readonly GatewayConfigSource[];
   readonly fallback: string;
 }
 
@@ -39,8 +45,8 @@ function clean(value: unknown): string {
   return typeof value === "string" ? value.trim().replace(/\/+$/, "") : "";
 }
 
-/** 只认 http(s)：写错的地址（少了 scheme、写成 file://）在这里就报出来 */
-function usable(value: string): boolean {
+/** 只认 http(s)：写错的地址（少了 scheme、写成 file://）在这里就报出来。写配置文件前也用它守一道 */
+export function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
     return url.protocol === "http:" || url.protocol === "https:";
@@ -57,16 +63,21 @@ export function resolveGateway(options: ResolveGatewayOptions): ResolvedGateway 
   for (const candidate of options.candidates) {
     const value = clean(candidate.value);
     if (!value) continue;
-    return usable(value)
+    return isHttpUrl(value)
       ? { ok: true, gateway: value, from: candidate.from }
       : { ok: false, error: `${candidate.from} is not an http(s) URL: ${value}` };
   }
-  const configured = options.config ? clean(options.config.read()) : "";
-  if (configured) {
-    const label = options.config?.label ?? "config";
-    return usable(configured)
-      ? { ok: true, gateway: configured, from: label }
-      : { ok: false, error: `${label} gateway is not an http(s) URL: ${configured}` };
+  // 多级配置按给出的顺序问：某级坏了立刻失败 —— 那是用户显式写下的东西，吞掉等于替他换配置
+  const sources =
+    options.config === undefined ? [] : Array.isArray(options.config) ? [...options.config] : [options.config];
+  for (const source of sources) {
+    const read = source.read();
+    if ("error" in read) return { ok: false, error: read.error };
+    const configured = clean(read.value);
+    if (!configured) continue;
+    return isHttpUrl(configured)
+      ? { ok: true, gateway: configured, from: source.label }
+      : { ok: false, error: `${source.label} gateway is not an http(s) URL: ${configured}` };
   }
   return { ok: true, gateway: clean(options.fallback), from: "default" };
 }

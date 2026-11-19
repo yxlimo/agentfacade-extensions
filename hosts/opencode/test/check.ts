@@ -607,7 +607,7 @@ console.log("setup：失败路径不注册（用户配置继续生效）");
       (w) =>
         w.includes(DEFAULT_GATEWAY) &&
         w.includes("OPENCODE_FACADE_GATEWAY") &&
-        w.includes("buddy-helper/config.json"),
+        w.includes("agentfacade/config.json"),
     ),
     JSON.stringify(warnings),
   );
@@ -777,6 +777,8 @@ console.log("");
 console.log("resolveGateway（候选顺序是 opencode 的事实）");
 
 const home = tempHome();
+fs.mkdirSync(path.join(home, ".config", "agentfacade"), { recursive: true });
+fs.writeFileSync(path.join(home, ".config", "agentfacade", "config.json"), '{"gateway":"http://new-config.example:6450"}');
 fs.mkdirSync(path.join(home, ".config", "buddy-helper"), { recursive: true });
 fs.writeFileSync(path.join(home, ".config", "buddy-helper", "config.json"), '{"gateway":"http://from-config.example:6450/"}');
 
@@ -786,7 +788,7 @@ fs.writeFileSync(path.join(home, ".config", "buddy-helper", "config.json"), '{"g
     home,
   );
   check(
-    "OPENCODE_FACADE_GATEWAY 赢过 FACADE_GATEWAY 与配置文件",
+    "OPENCODE_FACADE_GATEWAY 赢过其它所有级（值与 from 都能和别的级区分）",
     both.ok && both.gateway === "http://opencode.example:6450" && both.from === "OPENCODE_FACADE_GATEWAY",
     JSON.stringify(both),
   );
@@ -795,7 +797,7 @@ fs.writeFileSync(path.join(home, ".config", "buddy-helper", "config.json"), '{"g
 {
   const facade = resolveGateway({ FACADE_GATEWAY: "http://facade.example:6450" }, home);
   check(
-    "没有 agent 自己的变量时 FACADE_GATEWAY 赢过配置文件",
+    "没有 agent 自己的变量时 FACADE_GATEWAY 赢过两级配置文件",
     facade.ok && facade.gateway === "http://facade.example:6450" && facade.from === "FACADE_GATEWAY",
     JSON.stringify(facade),
   );
@@ -804,9 +806,21 @@ fs.writeFileSync(path.join(home, ".config", "buddy-helper", "config.json"), '{"g
 {
   const fromFile = resolveGateway({}, home);
   check(
-    "都没有时读 ~/.config/buddy-helper/config.json 的 gateway，并去掉末尾斜杠",
-    fromFile.ok && fromFile.gateway === "http://from-config.example:6450" && fromFile.from === "config file",
+    "环境变量都空 → 读 ~/.config/agentfacade/config.json（三个 agent 共用那份）",
+    fromFile.ok && fromFile.gateway === "http://new-config.example:6450" && fromFile.from === "config file",
     JSON.stringify(fromFile),
+  );
+}
+
+{
+  const legacyHome = tempHome();
+  fs.mkdirSync(path.join(legacyHome, ".config", "buddy-helper"), { recursive: true });
+  fs.writeFileSync(path.join(legacyHome, ".config", "buddy-helper", "config.json"), '{"gateway":"http://from-config.example:6450/"}');
+  const fromLegacy = resolveGateway({}, legacyHome);
+  check(
+    "只有旧路径 → 读 buddy-helper，from 是 legacy config file，末尾斜杠去掉",
+    fromLegacy.ok && fromLegacy.gateway === "http://from-config.example:6450" && fromLegacy.from === "legacy config file",
+    JSON.stringify(fromLegacy),
   );
 }
 
@@ -818,10 +832,25 @@ fs.writeFileSync(path.join(home, ".config", "buddy-helper", "config.json"), '{"g
     JSON.stringify(nowhere),
   );
 
+  // 自己的那份严格：坏文件报错；旧文件宽容：坏文件当没配 —— 两条分开钉
+  const brokenOwn = tempHome();
+  fs.mkdirSync(path.join(brokenOwn, ".config", "agentfacade"), { recursive: true });
+  fs.writeFileSync(path.join(brokenOwn, ".config", "agentfacade", "config.json"), "{ not json");
+  const own = resolveGateway({}, brokenOwn);
+  check(
+    "自己的配置文件 JSON 坏 → 报错带文件路径与原因，不悄悄退默认",
+    !own.ok && own.error.includes("agentfacade/config.json") && own.error.includes("not valid JSON"),
+    JSON.stringify(own),
+  );
+
   const broken = tempHome();
   fs.mkdirSync(path.join(broken, ".config", "buddy-helper"), { recursive: true });
   fs.writeFileSync(path.join(broken, ".config", "buddy-helper", "config.json"), "{ not json");
-  check("配置文件坏了 → 当成没配，退到默认网关", resolveGateway({}, broken).ok, JSON.stringify(resolveGateway({}, broken)));
+  check(
+    "旧配置文件坏了 → 当成没配，退到默认网关（历史行为，与新文件不同）",
+    resolveGateway({}, broken).ok,
+    JSON.stringify(resolveGateway({}, broken)),
+  );
 }
 
 {
@@ -841,10 +870,11 @@ check(
 check("超时预算是 1500ms（启动路径上被 await 的那个数）", DEFAULT_TIMEOUT_MS === 1500, String(DEFAULT_TIMEOUT_MS));
 
 {
-  // 配置文件里那一级真的会变成请求地址（不是只有 resolveGateway 认得）
+  // 配置文件里那一级真的会变成请求地址（不是只有 resolveGateway 认得）。
+  // home 里两级文件都在：共用的 agentfacade 那份赢过旧路径 —— 优先级顺着请求走了一遍
   const { impl, calls } = captureFetch(() => jsonResponse(ONE_LISTED));
   await runSetup({ fetchOptions: { fetchImpl: impl }, pluginOptions: { home } });
-  check("配置文件里的地址被真的拿去请求", same(calls.map(listTarget), ["http://from-config.example:6450/v1/models"]), JSON.stringify(calls));
+  check("配置文件里的地址被真的拿去请求（共用那份赢过旧路径）", same(calls.map(listTarget), ["http://new-config.example:6450/v1/models"]), JSON.stringify(calls));
 }
 
 {

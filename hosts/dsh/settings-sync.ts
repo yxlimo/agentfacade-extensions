@@ -4,7 +4,7 @@
 
 import { validateProviderProfile, type PiAiProviderProfile } from "./provider.ts";
 
-/** 形状照已安装 dsh 包的 `dsh-settings.d.ts`（索引见 docs/reference/README.md）；不 import 那个包，它依赖 cordis */
+/** 形状照已安装 dsh 包的 `dsh-settings.d.ts`（在已安装的 dsh 包里）；不 import 那个包，它依赖 cordis */
 export interface SettingsDescriptor {
   ns: string;
   autoGenerate?: boolean;

@@ -11,6 +11,13 @@ import { pickNamespace, probeCapabilities, writeProvider, type Capabilities, typ
 /** 插件名（cordis 侧显示用） */
 export const name = "agentfacade-models";
 
+/**
+ * cordis 的服务依赖。不声明就直接读 `ctx.settings` 会抛
+ * `cannot get property "settings" without inject`（实测：插件始终不激活）。
+ * 只列 settings：写模型必须走它，缺了就该停下来而不是静默降级。
+ */
+export const inject = ["settings"];
+
 /** provider 路由名：独立名字，不与用户已有的路由（buddy / minimax-code …）撞名 */
 export const PROVIDER_NAME = "agentfacade";
 
@@ -62,6 +69,8 @@ export interface DshState {
   writePath: string;
   /** 能力探测只做一次，缓存这里 */
   capabilities: Capabilities | null;
+  /** 最近一次的同步报告。cordis 的 apply 不返回它（返回值被当 effect 收集），放这里 */
+  report: SyncReport | null;
 }
 
 /** apply 的结果。ok:false 时 error 是给人看的一句话 */
@@ -71,11 +80,11 @@ export type SyncReport =
 
 /** 新状态。测试可以自己造一份传给 apply 复用 */
 export function createState(): DshState {
-  return { ns: null, lastGood: null, gateway: "", from: "", lastRefresh: null, lastError: null, writePath: "", capabilities: null };
+  return { ns: null, lastGood: null, gateway: "", from: "", lastRefresh: null, lastError: null, writePath: "", capabilities: null, report: null };
 }
 
-/** 插件入口。apply 在启动路径上被 await，第一次请求前 provider 必须就位；第三个参数只为测试注入状态 */
-export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState = createState()): Promise<SyncReport> {
+/** 同步一次的全流程。启动路径上被 await：第一次请求前 provider 必须就位；state 由调用方给 */
+export async function syncNow(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState): Promise<SyncReport> {
   const warn = pickWarn(ctx, config);
   const log = (message: string): void => {
     const line = `${PREFIX} ${message}`;
@@ -181,6 +190,15 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {},
       `${value.models.length} model(s), api=${value.api}, baseURL=${value.baseURL}`,
   );
   return { ok: true, ns: state.ns, writePath: state.writePath, models: value.models.length, gateway: state.gateway, from: state.from };
+}
+
+/**
+ * cordis 的插件入口。cordis 把 apply 的返回值当 effect 收集：函数会被当作卸载钩子，
+ * 其余非空值一律 `TypeError: Invalid effect`（第一次真启动时就是挂在这里）。
+ * 所以入口不返回报告——报告放进 state.report，describe(state) 也能读。
+ */
+export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState = createState()): Promise<void> {
+  state.report = await syncNow(ctx, config, state);
 }
 
 /** 给用户看的那几行，文案是 dsh 的说法；排障时能一眼看出走的是哪条分叉 */

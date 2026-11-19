@@ -1,0 +1,20 @@
+{
+  "name": "dsh-agentfacade",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Let DeepSeek Harness load its model catalog from an AgentFacade gateway through its own settings API",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": ["*.ts", "cordis.patch.yml", "core"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

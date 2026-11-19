@@ -1,12 +1,29 @@
-# reference/ — 原样摘录的第三方参考件
+# reference/ — 第三方约定的去处（只放链接，不放拷贝）
 
-这里的东西是**别的项目里的原文摘录**，为的是让受限的子代理（作用域只在本次项目树内）
-能读到宿主的真实约定。它们不是本项目的代码：
+这里**不放任何原文摘录**，只写「想确认某件事，去哪儿读」。
 
-- 不维护、不修 lint、不纳入 `typecheck`（根 `tsconfig.json` 只 include `core/` 与 `hosts/`）。
-- 里面的未使用变量、风格问题都是原文如此，**不要为了消警告去改它们** —— 改过就不再是原文，
-  读的人会以为宿主就是这么写的。
-- `dsh/`：cordis 插件样例（`cron-runner`、`profile-context-lite`）与 `bli-sync` 的两个文件。
-- `opencode/`：本机 `~/.config/opencode/` 里的配置样例（provider / models 的真实形状）。
+为什么不放拷贝：
 
-要更新：从源目录重新拷，不要手改。
+- 拷进来就是一份会过期的副本 —— 宿主升级后没人会记得回来重拷，反而让人以为那就是当前形状。
+- 这些条目里混着**别人仓库里的私有配置**（`~/.config/opencode/`、`~/nix-config/`）。本仓是要发
+  npm 包、要公开的，私有内容不该跟着走。
+- 读原处不需要额外授权：子代理 bash 沙箱的读根是 `/`（Landlock 只锁写），所以「给出路径」和
+  「拷一份进来」在能力上没有区别，只是后者多了上面两个代价。
+
+## 想确认什么 → 去哪儿读
+
+| 要确认的事 | 读哪里 |
+| --- | --- |
+| dsh 的 `llm` / `settings` 接缝真实签名（`registerAdapter`、`registerConfigurableProviders`、`settings.mutate`） | 已安装的 dsh 包：`ls -d /nix/store/*dsh-*/lib/node_modules/@deepseek-ai/dsh` 后读其中 `src/**/*.d.ts` 与 `docs/`。上游：<https://github.com/deepseek-ai/deepseek-harness>（`apps/cli`） |
+| dsh 版本与容器版本的差异 | `dsh --version`；容器镜像 tag 另行确认。三个版本（容器 / 本地 CLI / 上游 master）的接缝是否一致要逐个对照读，不看版本号下结论 |
+| cordis 插件的最小形态（`export const name` / `Config` / `apply`） | `~/projects/dsh/plugins/dsh-profile-context-lite/`（`index.js` + `package.json` + `cordis.patch.yml`） |
+| provider 是怎么挂进 `llm-pi-ai` 的（`cordis.patch.yml` 的真实写法） | `~/projects/dsh-plugins/bli-sync/cordis.patch.yml` 与 `~/projects/dsh-plugins/bli-sync/lib/` |
+| profile 的 seed patch 形态（顶层数组、允许 `!!js` 表达式） | `~/.dsh/profiles/<profile>/cordis.patch.yml` |
+| 我们这份 provider patch 的实测可用形态 | `~/nix-config/modules/nixos/nas-dsh.nix`（Nix 生成，实际部署的那份） |
+| opencode 配置的真实形状（`providers.<id>`、`plugins` 是复数数组） | `~/.config/opencode/opencode.jsonc`、`~/.config/opencode/shay-models.jsonc`；schema：<https://opencode.ai/config.json> |
+
+## 规矩
+
+- 需要新的第三方证据时：**读原处，把路径写进上表**，不要拷文件进来。
+- 上表里的路径是本机事实，可能随版本变化；发现对不上就更新这一行，不要「顺手修好」拷来的副本。
+- 本目录不参与 `typecheck`、不参与 lint，因为它没有代码可检。

@@ -1,4 +1,0 @@
-# 本包实例化后 provide "profileContext" 服务（无配置项）。
-- insert:
-    - id: profile-context-lite
-      name: 'dsh-profile-context-lite'

@@ -36,7 +36,7 @@ npm 包名或**本地目录的绝对路径**。指向本目录：
 }
 ```
 
-（`plugins` 这个键与「数组里可以放 npm 包名」有实测依据：`docs/reference/opencode/opencode.example.jsonc`
+（`plugins` 这个键与「数组里可以放 npm 包名」有实测依据：`~/.config/opencode/opencode.jsonc`
 那份真实配置里就是 `"plugins": ["@cortexkit/opencode-magic-context@latest"]`。）
 
 本地插件写的是**目录**，不是文件：写成 `.ts` 路径会直接报错

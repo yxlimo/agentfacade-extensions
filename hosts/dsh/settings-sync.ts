@@ -16,8 +16,8 @@
 import { validateProviderProfile, type PiAiProviderProfile } from "./provider.ts";
 
 /**
- * describe() 的一条。字段形状照 0.2.2-rc.1 的 dsh-settings.d.ts（vendor 在
- * docs/reference/dsh/api/）。这里不 import 那个包：它依赖 @deepseek-ai/cordis，
+ * describe() 的一条。字段形状照已安装 dsh 包的 `dsh-settings.d.ts`（在 /nix/store 下找到
+ * dsh-0.2.2 的包目录后读其 lib/node_modules/@deepseek-ai/dsh；索引在 docs/reference/README.md）。这里不 import 那个包：它依赖 @deepseek-ai/cordis，
  * 本仓装不了。`revision` 可选 —— 老形态宿主可能不返回它（docs/hosts-dsh.md 的分叉表）。
  */
 export interface SettingsDescriptor {

@@ -31,7 +31,7 @@ const PREFIX = "[agentfacade-models/dsh]";
 /**
  * dsh 传给插件的 context 里本插件用到的部分。
  *
- * 形状照 docs/reference/dsh/api/ 的 vendor 类型缩到最小：本仓装不了
+ * 形状照已安装 dsh 包的 `.d.ts`（见 docs/reference/README.md）缩到最小：本仓装不了
  * @deepseek-ai/cordis，所以只声明用到的两个成员。
  */
 export interface DshPluginContext {

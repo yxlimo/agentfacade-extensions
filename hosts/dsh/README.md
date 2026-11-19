@@ -40,7 +40,7 @@ dsh 的生效途径是宿主自己的设置 API：`ctx.settings`（落到 profil
   pi-ai 专门为「空签名被原样回放」提供 `allowEmptySignature` 兼容开关，dsh 的 llm-pi-ai 也走
   pi-ai，多轮回放同样有风险。
 - `openai-completions`：推理走 `reasoning_content`，没有签名回放问题；用户现有的
-  `docs/reference/dsh/provider-patch.example.yml` 走的也是这条。
+  provider patch（`~/nix-config/modules/nixos/nas-dsh.nix`） 走的也是这条。
 
 `anthropic-messages` 保留为可配置项（`api` 字段）。**如果切过去，请把上面那条空签名风险带上**：
 这是已知雷点，不是偏好问题。将来网关开始返回真实签名，再把默认翻回去。

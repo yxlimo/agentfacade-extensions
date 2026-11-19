@@ -24,7 +24,7 @@ import { PROVIDER_ID, PROVIDER_NAME, providerBaseUrl } from "./catalog.ts";
 
 /** 网关的模型都能开工具；opencode 靠这一格决定要不要把工具定义发下去 */
 const TOOLS = true;
-/** 模态：录制里 16 个模型全是这两项（docs/reference/opencode/models.example.jsonc）。按录制的事实填，不是猜。 */
+/** 模态：录制里 16 个模型全是这两项（`~/.config/opencode/shay-models.jsonc` 的实录制）。按录制的事实填，不是猜。 */
 const INPUT_MODALITIES = ["text", "image"] as const;
 const OUTPUT_MODALITIES = ["text"] as const;
 

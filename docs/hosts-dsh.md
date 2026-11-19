@@ -108,7 +108,7 @@ declare class SettingsForms {
 1. 空 signature 在 anthropic 多轮回放上是已知雷点 —— pi-ai 专门为此提供 `allowEmptySignature` 兼容开关，
    说明「空签名被原样回放」是真实会出问题的路径。dsh 的 `llm-pi-ai` 也走 pi-ai，同样受此约束。
 2. 网关明确产出 `reasoning_content`，`openai-completions` 是它的原生表达，没有签名回放问题。
-3. 用户现有的 `docs/reference/dsh/provider-patch.example.yml` 走的就是 `openai-completions`，
+3. 用户现有的 用户自己的 provider patch（由 `~/nix-config/modules/nixos/nas-dsh.nix` 生成） 走的就是 `openai-completions`，
    默认对齐它，出问题时差异面更小。
 
 `anthropic-messages` 保留为**可配置选项**（`api` 字段可改），但必须在 README 里写明空签名那一节的风险。

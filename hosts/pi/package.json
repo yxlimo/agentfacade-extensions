@@ -1,5 +1,5 @@
 {
-  "name": "pi-models-plugin",
+  "name": "pi-agentfacade",
   "version": "0.1.0",
   "private": true,
   "type": "module",

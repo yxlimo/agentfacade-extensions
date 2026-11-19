@@ -1,6 +1,6 @@
-// test/check.ts — pi-models-plugin 的自检。
+// test/check.ts — pi-agentfacade 的自检。
 //
-//   node --experimental-strip-types test/pi-models-plugin-check.ts
+//   cd hosts/pi && node --experimental-strip-types test/check.ts
 //
 // 覆盖四块：
 //   · 字段映射：ModelSpec[] → pi 的 provider 配置。输入面是下面手写的 SPECS（17 条），

@@ -1,4 +1,4 @@
-# pi-models-plugin
+# pi-agentfacade
 
 让 pi 自己从网关拿模型清单，不用手工维护 `~/.pi/agent/models.json`。
 
@@ -13,13 +13,14 @@ pi 的扩展发现位置有三种，选一种：
 
 ```bash
 # 只在这一次启动里用（验证最快，不写入任何配置）
-pi -e ~/extensions/pi-models-plugin --list-models
+# 只在这一次启动里用（验证最快，不写入任何配置）
+pi -e ~/extensions/agentfacade-extensions/hosts/pi --list-models
 
-# 装成常驻：软链到 pi 的扩展目录
-ln -s ~/extensions/pi-models-plugin ~/.pi/agent/extensions/pi-models-plugin
+# 装成常驻：软链到 pi 的扩展目录（这台机上的其它本地扩展都是这么装的）
+ln -s ~/extensions/agentfacade-extensions/hosts/pi ~/.pi/agent/extensions/pi-agentfacade
 
 # 或者交给 pi 记进 settings.json（见下面的坑）
-pi install ~/extensions/pi-models-plugin
+pi install ~/extensions/agentfacade-extensions/hosts/pi
 ```
 
 **坑：`pi install` 在「settings 由外部管理」的机器上会被回滚。** 若 pi 是被
@@ -29,6 +30,7 @@ home-manager / nix 之类的 wrapper 启动的，那个 wrapper 通常每次启�
 这种机器用软链，别用 `pi install`。
 
 注意 pi 不扫当前目录，在这个目录里直接跑 `pi` 不会加载它。
+
 ## 网关地址从哪来
 
 四级：
@@ -110,7 +112,7 @@ home-manager / nix 之类的 wrapper 启动的，那个 wrapper 通常每次启�
 
 ## 命令
 
-```
+```text
 /facade-models          当前注册了几条模型、来自哪个网关、最后一次刷新时间
 /facade-models refresh  立刻重拉一次，并替换已注册的清单
 ```

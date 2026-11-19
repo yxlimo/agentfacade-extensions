@@ -3,43 +3,109 @@
 //   node --experimental-strip-types test/pi-models-plugin-check.ts
 //
 // 覆盖四块：
-//   · 字段映射：网关的 /v1/models 响应 → pi 的 provider 配置。期望值里的档位映射
-//     的期望值写在 fixtures/expected.ts 里 —— 手写快照，不由任何程序生成
+//   · 字段映射：ModelSpec[] → pi 的 provider 配置。输入面是下面手写的 SPECS（17 条），
+//     期望值写在 fixtures/expected.ts 里 —— 手写快照，不由任何程序生成。
+//     网关报文长什么样不在这层：那是 core 的事，形状只留一份。
 //   · 网关地址解析：PI_FACADE_GATEWAY > FACADE_GATEWAY > 配置文件
 //   · 真实网络：起一个 127.0.0.1 的假网关（startFakeUpstream），走真的 fetch；
 //     可达时注册的模型数等于 /v1/models 的 data 长度，不可达时**不注册**且不抛
 //   · 刷新与命令：refreshModels 重新拉、拉不到时交回上一次的清单而不是空数组、
 //     /facade-models 显示的几个数字
 //
-// 全部离线：假网关在本机、录制的响应在 fixtures 里，不碰真网关也不花额度。
+// 全部离线：假网关在本机、清单是手写的 ModelSpec，不碰真网关也不花额度。
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import facadeModels, { describe, refresh, type PiExtensionApi, type PluginOptions, type RefreshModels } from "../index.ts";
 import {
   effectiveEfforts,
   levelMap,
-  modelsFromPayload,
-  toPiModel,
+  toPiModelEntry,
   toProviderConfig,
   type PiModelEntry,
   type PiProviderConfig,
 } from "../catalog.ts";
 import { fetchModelList, modelsUrl } from "../../../core/gateway.ts";
+import type { ModelSpec } from "../../../core/types.ts";
 import { resolveGateway } from "../gateway-config.ts";
 import { EXPECTED as EXPECTED_SNAPSHOT } from "../fixtures/expected.ts";
 import { startFakeUpstream } from "./fake-upstream.ts";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const FIXTURES = path.join(HERE, "..", "fixtures");
-const RECORDED = JSON.parse(fs.readFileSync(path.join(FIXTURES, "gateway-v1-models.json"), "utf8")) as {
-  /** 录下来的网关清单：只声明断言真正读到的字段，其余保持放开 */
-  data: Array<{ id: string } & Record<string, unknown>>;
-};
 const EXPECTED = EXPECTED_SNAPSHOT;
+
+/**
+ * 一条 ModelSpec 的构造器：只写这条用例关心的字段，其余按「网关没报」的默认值。
+ *
+ * 默认值不是断言（下面每处断言仍然逐字写出期望结果）；它存在的理由只是 ModelSpec 有
+ * 八格，而一条用例通常只关心其中两三格。
+ */
+function spec(fields: Partial<ModelSpec> & { id: string }): ModelSpec {
+  return {
+    displayName: fields.id,
+    reasoning: true,
+    efforts: [],
+    contextWindow: 200000,
+    maxOutputTokens: 4096,
+    toolCall: null,
+    modalities: null,
+    cost: null,
+    ...fields,
+  };
+}
+
+/**
+ * 快照用例的输入：17 条 ModelSpec —— **宿主的输入**，不是网关的报文。
+ *
+ * 为什么不放一份录制：宿主的职责是「ModelSpec → 宿主配置」。网关报文的形状只该有一份
+ * （在 core 的测试里）；宿主测试再抄一份，网关换个渲染这一层就得跟着改，而它一个字段
+ * 都没变。这里要覆盖的是**映射真正处理的形状**：`off` 单独一档、四档齐全、四档齐全但
+ * 夹着 `default` 与 `xhigh`、`none`、拼错的 `midium`、以及窗口/输出上限各不相同的那些。
+ *
+ * 三个新字段按「这一版网关没报」写：`toolCall` 照录制（model-09/10 是 false，pi 不用
+ * 它），`modalities` 与 `cost` 是 null。`cost: null` 走「没报价」那条分支，所以快照里的
+ * 价格全是 0 —— 有价格的用例单独列在下面。
+ */
+const SPECS: ModelSpec[] = [
+  spec({ id: "model-01", displayName: "Model 01", efforts: ["off", "low", "high", "max"], contextWindow: 1000000, maxOutputTokens: 384000 }),
+  spec({ id: "model-02", displayName: "Model 02", efforts: ["off", "default", "low", "medium", "high", "xhigh", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "model-03", displayName: "Model 03", efforts: ["off", "low", "high", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "model-04", displayName: "Model 04", efforts: ["off", "none", "high"], contextWindow: 1048576, maxOutputTokens: 65536 }),
+  // "midium" 是上游真实拼写：原样进 levelMap（收敛规则自己决定它映到哪）
+  spec({ id: "model-05", displayName: "Model 05", efforts: ["off", "low", "midium", "high"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "model-06", displayName: "Model 06", efforts: ["off", "low", "high", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "model-07", displayName: "Model 07", efforts: ["off", "low", "high", "max"], contextWindow: 1000000, maxOutputTokens: 384000 }),
+  spec({ id: "model-08", displayName: "Model 08", efforts: ["off", "default", "low", "medium", "high", "xhigh", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  // toolCall=false 的模型在 pi 侧没有任何差别（pi 这一侧不表达能不能调工具）
+  spec({ id: "model-09", displayName: "Model 09", efforts: ["off", "low", "high"], contextWindow: 131072, maxOutputTokens: 32768, toolCall: false }),
+  spec({ id: "model-10", displayName: "Model 10", efforts: ["off", "low", "high"], contextWindow: 131072, maxOutputTokens: 65536, toolCall: false }),
+  spec({ id: "model-11", displayName: "Model 11", efforts: ["off", "default", "low", "medium", "high", "xhigh", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "model-12", displayName: "Model 12", efforts: ["off", "none", "high"], contextWindow: 1048576, maxOutputTokens: 65536 }),
+  spec({ id: "model-13", displayName: "Model 13", efforts: ["off", "low", "high", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "model-14", displayName: "Model 14", efforts: ["off"], contextWindow: 1000000, maxOutputTokens: 262144 }),
+  spec({ id: "model-15", displayName: "Model 15", efforts: ["off", "low", "midium", "high"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "model-16", displayName: "Model 16", efforts: ["off", "low", "high", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "model-17", displayName: "Model 17", efforts: ["off", "low", "high", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+];
+
+/**
+ * 假网关的响应体：**只有 id**。
+ *
+ * 宿主的义务到 ModelSpec 为止；条目里其余字段长什么样是 core 的事（形状只留一份），
+ * 这样网关改渲染时这一层不会被拖下水。这些用例需要的只是「有 N 条能过 core 的清单」。
+ */
+const LISTED = { data: SPECS.map(({ id }) => ({ id })) };
+
+/**
+ * 请求打到的是不是模型清单那一路。
+ *
+ * 只看路径：清单地址上挂什么方言（`?dialect=` 之类）是 core 的事，宿主这一层不该知道。
+ * 写死整条 URL 会让 core 换个方言这一层就红 —— 那不是宿主的行为变了。
+ */
+function isModelsPath(url: string): boolean {
+  return url.split("?")[0] === "/v1/models";
+}
 
 let pass = 0;
 let fail = 0;
@@ -187,65 +253,114 @@ check(
 );
 
 console.log("");
-console.log("effectiveEfforts / toPiModel");
+console.log("effectiveEfforts / toPiModelEntry");
 
 check("没有档位 + reasoning=false → 只有 off", same(effectiveEfforts(null, false), ["off"]));
 check("没有档位 + reasoning 不知道 → 什么都不给（关不掉思考）", same(effectiveEfforts(null, null), []));
 check("有档位就照网关给的，不看 reasoning", same(effectiveEfforts(["off", "high"], false), ["off", "high"]));
 
-const noThinking = toPiModel({ id: "flat", reasoning: false });
-check("reasoning=false 的模型 reasoning 写 false", noThinking.reasoning === false, String(noThinking.reasoning));
-check(
-  "reasoning=false 且没有档位 → 每个 pi 档位都映 off",
-  Object.values(noThinking.thinkingLevelMap).every((v) => v === "off"),
-  JSON.stringify(noThinking.thinkingLevelMap),
-);
+{
+  const noThinking = toPiModelEntry(spec({ id: "flat", displayName: "Flat", reasoning: false }));
+  check("reasoning=false 的模型 reasoning 写 false", noThinking.reasoning === false, String(noThinking.reasoning));
+  check(
+    "reasoning=false 且没有档位 → 每个 pi 档位都映 off",
+    Object.values(noThinking.thinkingLevelMap).every((v) => v === "off"),
+    JSON.stringify(noThinking.thinkingLevelMap),
+  );
+}
 
-const unknownThinking = toPiModel({ id: "mystery" });
-check("网关没说 reasoning → 按支持处理", unknownThinking.reasoning === true, String(unknownThinking.reasoning));
-check(
-  "网关没给档位也没说 reasoning → 全是 null",
-  Object.values(unknownThinking.thinkingLevelMap).every((v) => v === null),
-  JSON.stringify(unknownThinking.thinkingLevelMap),
-);
+{
+  // 档位阶梯是宿主的事：这里只钉「spec.efforts 真的接到了 levelMap 上」（逐字）
+  const mapped = toPiModelEntry(spec({ id: "m", efforts: ["off", "high"] }));
+  check(
+    "spec.efforts 接到 thinkingLevelMap（收敛规则在这一层）",
+    same(mapped.thinkingLevelMap, {
+      off: "off",
+      minimal: "high",
+      low: "high",
+      medium: "high",
+      high: "high",
+      xhigh: "high",
+      max: "high",
+    }),
+    JSON.stringify(mapped.thinkingLevelMap),
+  );
+}
 
-const noLimits = toPiModel({ id: "no-limits" });
-check(
-  "context_window / max_output_tokens 缺失 → 200000 / 4096",
-  noLimits.contextWindow === 200000 && noLimits.maxTokens === 4096,
-  `${noLimits.contextWindow}/${noLimits.maxTokens}`,
-);
+{
+  const entry = toPiModelEntry(spec({ id: "coder-a", displayName: "Coder A", contextWindow: 131072, maxOutputTokens: 32768 }));
+  check("name 用 displayName（不是裸 id）", entry.name === "Coder A" && entry.name !== entry.id, `${entry.id} → ${entry.name}`);
+  check(
+    "窗口与输出上限原样搬（200000 / 4096 的缺省值由 core 补，这里不重算）",
+    entry.contextWindow === 131072 && entry.maxTokens === 32768,
+    `${entry.contextWindow}/${entry.maxTokens}`,
+  );
+  check("input 固定 text+image（pi 的模型定义只认这两项）", same(entry.input, ["text", "image"]), JSON.stringify(entry.input));
+}
 
-const zeroLimits = toPiModel({ id: "zeros", context_window: 0, max_output_tokens: 0 });
-check(
-  "上下文/输出上限是 0 也算「没说」",
-  zeroLimits.contextWindow === 200000 && zeroLimits.maxTokens === 4096,
-  `${zeroLimits.contextWindow}/${zeroLimits.maxTokens}`,
-);
+console.log("");
+console.log("cost（网关「每百万 token、美元」→ pi 的四格）");
 
-check(
-  "display_name 缺失 → name 用 id",
-  toPiModel({ id: "bare" }).name === "bare",
-  toPiModel({ id: "bare" }).name,
-);
+{
+  const priced = toPiModelEntry(spec({ id: "priced", cost: { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 } }));
+  check(
+    "有报价：三侧原样搬到 cost.input / output / cacheRead",
+    same(priced.cost, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 }),
+    JSON.stringify(priced.cost),
+  );
+  check("写缓存价恒为 0（网关不报这一项，宁可少算不虚报）", priced.cost.cacheWrite === 0, String(priced.cost.cacheWrite));
+}
 
-check(
-  "没有 id 的项跳过",
-  modelsFromPayload([{ id: "" }, { display_name: "no id" }, { id: "kept" }]).length === 1,
-  JSON.stringify(modelsFromPayload([{ id: "" }, { display_name: "no id" }, { id: "kept" }]).map((m) => m.id)),
-);
+{
+  // 网关没报价 → 全 0。这是 pi 的成本统计口径（它没有「未知价格」这个状态），不是我们的断言
+  const unpriced = toPiModelEntry(spec({ id: "unpriced", cost: null }));
+  check(
+    "cost === null（网关没报价）→ 四格全 0",
+    same(unpriced.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+    JSON.stringify(unpriced.cost),
+  );
+  check(
+    "cost 这一格永远存在（pi 的 calculateCost 读 model.cost.tiers，缺了第一个 SSE 事件就抛）",
+    Object.hasOwn(unpriced, "cost"),
+    JSON.stringify(Object.keys(unpriced)),
+  );
+}
+
+{
+  const outputOnly = toPiModelEntry(spec({ id: "output-only", cost: { outputPerMillion: 15 } }));
+  check(
+    "只报输出价：那一侧有价，没报的侧是 0（四格必须齐）",
+    same(outputOnly.cost, { input: 0, output: 15, cacheRead: 0, cacheWrite: 0 }),
+    JSON.stringify(outputOnly.cost),
+  );
+}
+
+{
+  // 0 元是**有**报价：判断用 ?? 而不是真值，否则「报了 0」与「没报」会走上同一条错路
+  const free = toPiModelEntry(spec({ id: "free", cost: { inputPerMillion: 0, outputPerMillion: 0, cacheReadPerMillion: 0 } }));
+  check(
+    "报 0 元：落到 0（不被当成「没报价」丢掉这一格）",
+    same(free.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+    JSON.stringify(free.cost),
+  );
+}
 
 // ── 整份配置的快照比对 ────────────────────────────────────────────────
 
 console.log("");
 console.log("整份 provider 配置");
 
-const fromFixture = modelsFromPayload(RECORDED.data);
-check("录制的响应有 17 条模型", fromFixture.length === 17, String(fromFixture.length));
+const fromSpecs = SPECS.map(toPiModelEntry);
+check("快照的输入面是 17 条 ModelSpec", fromSpecs.length === 17, String(fromSpecs.length));
 check(
-  "provider 配置与快照逐字相同",
-  same(toProviderConfig("http://gateway.example:6450", "public", fromFixture), EXPECTED),
-  JSON.stringify(toProviderConfig("http://gateway.example:6450", "public", fromFixture)).slice(0, 200),
+  "provider 配置与 fixtures/expected.ts 手写快照逐字相同",
+  same(toProviderConfig("http://gateway.example:6450", "public", fromSpecs), EXPECTED),
+  JSON.stringify(toProviderConfig("http://gateway.example:6450", "public", fromSpecs)).slice(0, 200),
+);
+check(
+  "每条模型都带 cost 与 compat（缺任一项 pi 在第一个 SSE 事件上就抛）",
+  fromSpecs.every((m) => Object.hasOwn(m, "cost") && m.compat.forceAdaptiveThinking && m.compat.sendSessionAffinityHeaders),
+  JSON.stringify(fromSpecs[0]),
 );
 
 // ── 网关地址解析 ─────────────────────────────────────────────────────────
@@ -298,7 +413,13 @@ check(
   JSON.stringify(resolveGateway({}, brokenConfigHome)),
 );
 
-check("模型清单地址是根路径下的 /v1/models", modelsUrl("http://gw.example:6450") === "http://gw.example:6450/v1/models", modelsUrl("http://gw.example:6450"));
+// 方言（query）是 core 的事：这里只钉「清单走的是根路径下的 /v1/models」
+check(
+  "模型清单地址的路径是根路径下的 /v1/models",
+  new URL(modelsUrl("http://gw.example:6450")).pathname === "/v1/models" &&
+    new URL(modelsUrl("http://gw.example:6450")).origin === "http://gw.example:6450",
+  modelsUrl("http://gw.example:6450"),
+);
 
 // ── 真实网络：可达与不可达 ──────────────────────────────────────────────
 
@@ -332,7 +453,7 @@ function runFactory(env: Record<string, string>, home: string, extra: Partial<Pl
 }
 
 const gateway = await startFakeUpstream((req) =>
-  req.url.startsWith("/v1/models") ? { body: RECORDED } : undefined,
+  isModelsPath(req.url) ? { body: LISTED } : undefined,
 );
 
 {
@@ -342,9 +463,9 @@ const gateway = await startFakeUpstream((req) =>
   const expected = EXPECTED.models.length;
   check("可达时注册了 provider agentfacade", pi.provider?.name === "agentfacade", JSON.stringify(pi.provider?.name));
   check(
-    `注册的模型数等于 /v1/models 的 data 长度（${RECORDED.data.length}）`,
-    pi.provider?.config.models.length === RECORDED.data.length && RECORDED.data.length === expected,
-    `${pi.provider?.config.models.length} vs ${RECORDED.data.length}`,
+    `注册的模型数等于 /v1/models 的 data 长度（${LISTED.data.length}）`,
+    pi.provider?.config.models.length === LISTED.data.length && LISTED.data.length === expected,
+    `${pi.provider?.config.models.length} vs ${LISTED.data.length}`,
   );
   check("baseUrl 是网关根地址（不带 /v1）", pi.provider?.config.baseUrl === gateway.url, String(pi.provider?.config.baseUrl));
   check("方言是 anthropic-messages", pi.provider?.config.api === "anthropic-messages", String(pi.provider?.config.api));
@@ -363,7 +484,7 @@ const gateway = await startFakeUpstream((req) =>
   check("可达时没有警告", warnings.length === 0, JSON.stringify(warnings));
   check(
     "打的是 /v1/models",
-    gateway.requests.length === 1 && gateway.requests[0].url === "/v1/models",
+    gateway.requests.length === 1 && isModelsPath(gateway.requests[0].url),
     JSON.stringify(gateway.requests.map((r) => r.url)),
   );
 }
@@ -436,7 +557,11 @@ const gateway = await startFakeUpstream((req) =>
   }) as unknown as typeof fetch;
   const { pi, warnings, options } = runFactory({}, tempHome(), { fetchOptions: { fetchImpl: failingFetch } });
   await facadeModels(pi, options);
-  check("什么都没配时去试默认网关 127.0.0.1:6450", seen.length === 1 && seen[0] === "http://127.0.0.1:6450/v1/models", JSON.stringify(seen));
+  check(
+    "什么都没配时去试默认网关 127.0.0.1:6450",
+    seen.length === 1 && new URL(seen[0]).origin === "http://127.0.0.1:6450" && isModelsPath(new URL(seen[0]).pathname),
+    JSON.stringify(seen),
+  );
   check("默认网关连不上 → 不注册（models.json 继续生效）", pi.provider === null);
   check(
     "默认地址连不上时，警告里带地址与「怎么改」（环境变量名）",
@@ -481,18 +606,18 @@ console.log("");
 console.log("refreshModels 与 /facade-models");
 
 {
-  let body: unknown = RECORDED;
+  let body: unknown = LISTED;
   const live = await startFakeUpstream(() => ({ body }));
   const { pi, warnings, options } = runFactory({ PI_FACADE_GATEWAY: live.url }, tempHome());
   await facadeModels(pi, options);
 
   const refreshModels = pi.provider!.config.refreshModels!;
-  body = { data: RECORDED.data.slice(0, 3) };
+  body = { data: LISTED.data.slice(0, 3) };
   const after = await refreshModels({});
   check("refreshModels 重新拉网关（清单变短也跟着变）", after.length === 3, String(after.length));
   check(
     "refreshModels 把新清单也写进了 provider 状态",
-    after[0]?.id === RECORDED.data[0].id && after.every((m) => m.id !== RECORDED.data[3].id),
+    after[0]?.id === LISTED.data[0].id && after.every((m) => m.id !== LISTED.data[3].id),
     `${after[0]?.id} … ${after.map((m) => m.id).join(",")}`,
   );
 
@@ -502,7 +627,7 @@ console.log("refreshModels 与 /facade-models");
   const emptied = await refreshModels({});
   check(
     "网关回空清单时交回上一份，而不是空数组",
-    emptied.length === 3 && emptied[0]?.id === RECORDED.data[0].id,
+    emptied.length === 3 && emptied[0]?.id === LISTED.data[0].id,
     `${emptied.length} 条`,
   );
   check(
@@ -525,7 +650,7 @@ console.log("refreshModels 与 /facade-models");
 {
   // pi 每次注册/凭据变化都会重刷 provider，新的刷新会把旧的那次 abort。
   // 这种取消不能当成「网关出错」，否则每次正常启动都会多一条吓人的警告
-  const live = await startFakeUpstream(() => ({ body: RECORDED }));
+  const live = await startFakeUpstream(() => ({ body: LISTED }));
   const { pi, warnings, options } = runFactory({ PI_FACADE_GATEWAY: live.url }, tempHome());
   await facadeModels(pi, options);
   const before = warnings.length;
@@ -533,13 +658,13 @@ console.log("refreshModels 与 /facade-models");
   const controller = new AbortController();
   controller.abort();
   const entries = await pi.provider!.config.refreshModels!({ signal: controller.signal });
-  check("被 pi 取消的刷新交回上一份清单", entries.length === RECORDED.data.length, String(entries.length));
+  check("被 pi 取消的刷新交回上一份清单", entries.length === LISTED.data.length, String(entries.length));
   check("被 pi 取消的刷新不报警告", warnings.length === before, JSON.stringify(warnings.slice(before)));
   await live.close();
 }
 
 {
-  const live = await startFakeUpstream((req) => (req.url === "/v1/models" ? { body: RECORDED } : undefined));
+  const live = await startFakeUpstream((req) => (isModelsPath(req.url) ? { body: LISTED } : undefined));
   const { pi, options } = runFactory({ PI_FACADE_GATEWAY: live.url }, tempHome());
   await facadeModels(pi, options);
 
@@ -547,7 +672,7 @@ console.log("refreshModels 与 /facade-models");
   const ctx = { ui: { notify: (text: string) => seen.push(text) } };
   await pi.command!.handler("", ctx);
   const text = seen.join("\n");
-  check("命令显示注册了多少条模型", text.includes(`${RECORDED.data.length} registered`), text);
+  check("命令显示注册了多少条模型", text.includes(`${LISTED.data.length} registered`), text);
   check("命令显示网关地址与来源", text.includes(live.url) && text.includes("PI_FACADE_GATEWAY"), text);
   check("命令显示最后一次刷新时间", /Last refresh: \d{4}-/.test(text), text);
   await live.close();
@@ -555,8 +680,8 @@ console.log("refreshModels 与 /facade-models");
 
 {
   // 启动时拉不到，之后 /facade-models refresh 把 provider 补注册上
-  let served: unknown = RECORDED;
-  const flaky = await startFakeUpstream((req) => (req.url === "/v1/models" ? { body: served } : undefined));
+  let served: unknown = LISTED;
+  const flaky = await startFakeUpstream((req) => (isModelsPath(req.url) ? { body: served } : undefined));
   const dead = await startFakeUpstream();
   const deadUrl = dead.url;
   await dead.close();
@@ -573,7 +698,7 @@ console.log("refreshModels 与 /facade-models");
   check("refresh 之后补注册了 provider", pi.provider?.name === "agentfacade", JSON.stringify(pi.provider?.name));
   check(
     "refresh 之后命令报告已注册",
-    seen.join("\n").includes(`${RECORDED.data.length} registered`),
+    seen.join("\n").includes(`${LISTED.data.length} registered`),
     seen.join("\n"),
   );
 
@@ -583,7 +708,7 @@ console.log("refreshModels 与 /facade-models");
   await pi.command!.handler("refresh", { ui: { notify: (t: string) => seen.push(t) } });
   check(
     "网关回空清单时 refresh 不拿空清单重注册，provider 还是原来那些模型",
-    pi.provider?.config.models.length === RECORDED.data.length,
+    pi.provider?.config.models.length === LISTED.data.length,
     `${pi.provider?.config.models.length} 条`,
   );
   check(
@@ -615,14 +740,14 @@ console.log("refreshModels 与 /facade-models");
   const lines = describe(state).join("\n");
   check("未注册时 describe 说 NOT registered 并给下一步", lines.includes("NOT registered") && lines.includes("/facade-models refresh"), lines);
 
-  const okState = { gateway: "http://gw.example:6450", from: "config file", models: [toPiModel({ id: "a" })], lastRefresh: Date.now(), lastError: null, registered: true };
+  const okState = { gateway: "http://gw.example:6450", from: "config file", models: [toPiModelEntry(spec({ id: "a" }))], lastRefresh: Date.now(), lastError: null, registered: true };
   check("已注册时 describe 报模型数与网关", describe(okState).join("\n").includes("1 registered"), describe(okState).join("\n"));
 }
 
 // ── refresh() 在成功后会清掉上一次的错误 ────────────────────────────────
 
 {
-  const live = await startFakeUpstream(() => ({ body: RECORDED }));
+  const live = await startFakeUpstream(() => ({ body: LISTED }));
   const state = { gateway: "", from: "", models: [] as PiModelEntry[], lastRefresh: null as number | null, lastError: "old failure" as string | null, registered: false };
   const result = await refresh(state, { env: { PI_FACADE_GATEWAY: live.url }, home: tempHome() });
   check("refresh 成功后清掉 lastError", result.ok && state.lastError === null, JSON.stringify(state.lastError));

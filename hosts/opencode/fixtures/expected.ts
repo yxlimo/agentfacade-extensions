@@ -1,14 +1,21 @@
-// 期望值的**手写快照**：由 fixtures/gateway-v1-models.json 那份录制人工推导，不由任何程序生成。
-//
-// 文件名里的 `v1` 是**网关**的 `/v1/models`，与「opencode 插件 v1」无关 —— 那份录制是网关的原始
-// payload，v1/v2 两个插件形状都从它推导。
+// 期望值的**手写快照**：由 test/check.ts 里那份 SNAPSHOT_SPECS（6 条显式 ModelSpec）人工推导，
+// 不由任何程序生成。
 //
 // 与测试分开放着，是为了让「改映射」这件事必须同时改两处：v2.ts 与这里。
 // 生成式的期望值做不到这一点 —— 实现改成什么样，期望值就跟着变成什么样，永远绿。
+//
+// 文件名叫 expected 而不是 fixtures.json：这里**没有**网关报文的拷贝。网关报文的形状只留一份
+// （在 core 的测试里），宿主这一层只认 ModelSpec。
 
 import type { OpencodeV2Payload } from "../v2.ts";
 
-/** 网关能开工具、模态是 text+image：录制的 16 个模型全是这两项 */
+/**
+ * 网关报过这三项时的形状：能调工具、模态 text+image。
+ *
+ * SNAPSHOT_SPECS 里那 6 条都显式写了 `toolCall: true` 与 `modalities: {input: ["text","image"],
+ * output: ["text"]}`，所以快照里这一格是同一个对象 —— 但它**不是**常量回填：v2.ts 从 spec
+ * 取值（见 test/check.ts 里 toolCall=false / modalities=[] 那几条用例）。
+ */
 const CAPABILITIES = {
   tools: true,
   input: ["text", "image"],
@@ -66,7 +73,7 @@ export const EXPECTED: OpencodeV2Payload = {
       limit: { context: 200000, output: 4096 },
     },
     {
-      // 什么字段都没给：名字退回 id（不是空串），窗口 200000/4096
+      // 名字与 id 一样只是这条输入的事实（displayName === id），不是「缺了才退回」的回填
       id: "bare",
       modelID: "bare",
       providerID: "agentfacade",
@@ -80,7 +87,7 @@ export const EXPECTED: OpencodeV2Payload = {
       limit: { context: 200000, output: 4096 },
     },
     {
-      // 0 是网关表达「没填」的方式，不是真的零窗口
+      // 窗口是 core 归一后的值（200000/4096）；「0 也算没说」那条规则属于 core 的用例
       id: "zeros",
       modelID: "zeros",
       providerID: "agentfacade",
@@ -94,7 +101,7 @@ export const EXPECTED: OpencodeV2Payload = {
       limit: { context: 200000, output: 4096 },
     },
     {
-      // 字符串数字 "131072" / "32768" 归一成数字
+      // 非默认的窗口值原样搬（归一成数字是 core 的事）
       id: "weird",
       modelID: "weird",
       providerID: "agentfacade",

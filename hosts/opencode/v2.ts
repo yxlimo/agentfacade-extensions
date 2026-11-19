@@ -22,11 +22,26 @@
 import type { AdapterOptions, ModelSpec } from "../../core/types.ts";
 import { PROVIDER_ID, PROVIDER_NAME, providerBaseUrl } from "./catalog.ts";
 
-/** 网关的模型都能开工具；opencode 靠这一格决定要不要把工具定义发下去 */
-const TOOLS = true;
-/** 模态：录制里 16 个模型全是这两项（`~/.config/opencode/shay-models.jsonc` 的实录制）。按录制的事实填，不是猜。 */
+/**
+ * 网关没说能不能调工具（`toolCall === null`）时按**支持**：与 pi 那一侧的缺省一致 ——
+ * 不知道不等于不能，缺省关掉工具会把模型降级成只会聊天。这是宿主的选择，core 不替我们猜。
+ */
+function toolsFor(spec: ModelSpec): boolean {
+  return spec.toolCall === null ? true : spec.toolCall;
+}
+
+/**
+ * 网关没报模态（`modalities === null`）时退回录制里的常量：`~/.config/opencode/shay-models.jsonc`
+ * 的实录制，16 个模型全是这两项。**退回的是录制里的事实，不是推断** —— 网关报了就以网关为准，
+ * 连「一个都不收」（`input: []`）也照它的来。
+ */
 const INPUT_MODALITIES = ["text", "image"] as const;
 const OUTPUT_MODALITIES = ["text"] as const;
+
+function modalitiesFor(spec: ModelSpec): { input: string[]; output: string[] } {
+  if (spec.modalities === null) return { input: [...INPUT_MODALITIES], output: [...OUTPUT_MODALITIES] };
+  return { input: [...spec.modalities.input], output: [...spec.modalities.output] };
+}
 
 /** opencode v2 的一条模型定义（`Model.Info` 的运行时形状） */
 export interface OpencodeV2Model {
@@ -78,9 +93,8 @@ export function toV2Model(spec: ModelSpec, providerID: string = PROVIDER_ID): Op
     providerID,
     name: spec.displayName,
     capabilities: {
-      tools: TOOLS,
-      input: [...INPUT_MODALITIES],
-      output: [...OUTPUT_MODALITIES],
+      tools: toolsFor(spec),
+      ...modalitiesFor(spec),
     },
     variants: [],
     time: { released: 0 },

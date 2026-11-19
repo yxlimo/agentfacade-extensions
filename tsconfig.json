@@ -12,5 +12,5 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true
   },
-  "include": ["core/**/*.ts", "hosts/opencode/**/*.ts", "hosts/dsh/**/*.ts"]
+  "include": ["core/**/*.ts", "hosts/*/**/*.ts", "scripts/**/*.ts"]
 }

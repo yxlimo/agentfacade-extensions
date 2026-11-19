@@ -86,9 +86,24 @@ export function resolveGateway(options: ResolveGatewayOptions): ResolvedGateway 
   return { ok: true, gateway: clean(options.fallback), from: "default" };
 }
 
-/** 网关的模型清单地址。主路由是根路径下的 /v1/models */
+/**
+ * 锁定报文方言。
+ *
+ * 同一份目录有不止一种渲染（字段名与层级各不相同），选哪种由 `?dialect=` 或请求头决定，
+ * **默认值在网关那边**。默认值随手一改，core 解析的字段名就整体错位（`limit.context` 读成
+ * 空值之类），而且不会报错、只会静默拿到一堆缺省值。所以方言写进 URL，不依赖网关的默认值。
+ */
+export const MODELS_DIALECT = "openai";
+
+/** 网关的模型清单地址。主路由是根路径下的 /v1/models，方言锁定在 query 上 */
 export function modelsUrl(gateway: string): string {
-  return `${gateway}/v1/models`;
+  // 地址自带 query 时（调用方可能带 token 之类）用 & 接在已有参数后面，不然会拼出两个 "?"，
+  // 第二个 "?" 之后的参数网关根本不看 —— 方言就静默失效了
+  const cut = gateway.indexOf("?");
+  const base = cut === -1 ? gateway : gateway.slice(0, cut);
+  const query = cut === -1 ? "" : gateway.slice(cut + 1);
+  const path = `${base}/v1/models`;
+  return query ? `${path}?${query}&dialect=${MODELS_DIALECT}` : `${path}?dialect=${MODELS_DIALECT}`;
 }
 
 export type ModelListResult =

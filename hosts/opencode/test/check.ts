@@ -4,7 +4,7 @@
 //
 // 覆盖这些块：
 //   · 映射：ModelSpec → v2 的 `Model.Info`；整份清单 → `editor.add()` 的入参。期望值里有手写快照
-//     （fixtures/expected.ts），来自录制的那份清单，逐字比对
+//     （fixtures/expected.ts），由 SNAPSHOT_SPECS 人工推导，逐字比对
 //   · setup：成功时 `add` 调一次；网关不可达 / 空清单 / 非 JSON / 地址写错时**一次都不调**，
 //     只在 stderr 留一行警告（用户原有配置继续生效）
 //   · 空清单绝不替换上一次的清单（core 的状态机，从这一侧也钉一遍）
@@ -19,7 +19,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { modelsFromPayload } from "../../../core/catalog.ts";
 import type { FetchOptions } from "../../../core/gateway.ts";
 import type { ModelSpec } from "../../../core/types.ts";
 import { API_KEY, PROVIDER_ID, PROVIDER_NAME, providerBaseUrl } from "../catalog.ts";
@@ -42,10 +41,6 @@ import { EXPECTED } from "../fixtures/expected.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST_DIR = path.join(HERE, "..");
-const FIXTURES = path.join(HOST_DIR, "fixtures");
-const RECORDED = JSON.parse(fs.readFileSync(path.join(FIXTURES, "gateway-v1-models.json"), "utf8")) as {
-  data: unknown[];
-};
 
 let pass = 0;
 let fail = 0;
@@ -133,7 +128,16 @@ function fakeContext(): {
 }
 
 const GATEWAY = "http://gateway.example:6450";
-const MODELS_URL = `${GATEWAY}/v1/models`;
+/**
+ * 「主机 + 路径」，去掉 query。
+ *
+ * 清单地址上挂什么方言（`?dialect=` 之类）是 core 的事：宿主这一层钉整条 URL，core 换个
+ * 方言这一层就红 —— 那不是宿主的行为变了。所以这里只钉打到哪台机器的哪条路径。
+ */
+function listTarget(url: string): string {
+  const parsed = new URL(url);
+  return `${parsed.origin}${parsed.pathname}`;
+}
 
 /** 跑一遍 setup，返回 editor.add 收到了什么。env/home 都可注入，绝不碰真实环境 */
 async function runSetup(options: {
@@ -153,6 +157,27 @@ async function runSetup(options: {
   return { added, transforms: transforms(), warnings };
 }
 
+/**
+ * 一条 ModelSpec 的构造器：只写这条用例关心的字段，其余按「网关没报」的默认值。
+ *
+ * 默认值不是断言（下面每处断言仍然逐字写出期望结果）；它存在的理由只是 ModelSpec 有
+ * 八格，而一条用例通常只关心其中两三格。注意 `toolCall: null` 与 `modalities: null`
+ * 是「网关没说」，**不是** false / 空数组 —— 这两格的差别是本宿主唯一要做选择的地方。
+ */
+function spec(fields: Partial<ModelSpec> & { id: string }): ModelSpec {
+  return {
+    displayName: fields.id,
+    reasoning: true,
+    efforts: [],
+    contextWindow: 200000,
+    maxOutputTokens: 4096,
+    toolCall: null,
+    modalities: null,
+    cost: null,
+    ...fields,
+  };
+}
+
 const SPEC: ModelSpec = {
   id: "model-01",
   displayName: "Model 01",
@@ -160,21 +185,21 @@ const SPEC: ModelSpec = {
   efforts: ["off", "low", "high", "max"],
   contextWindow: 1000000,
   maxOutputTokens: 384000,
+  // 网关这一版报的三项：能调工具、模态是 text+image、价格本宿主不表达
+  toolCall: true,
+  modalities: { input: ["text", "image"], output: ["text"] },
+  cost: null,
 };
 
-/** 一份最小的网关回答：一条模型，用来钉逐字快照 */
+/**
+ * 假网关的回答：一条模型，**只给 id**。
+ *
+ * 宿主的义务到 ModelSpec 为止；条目里其余字段长什么样是 core 的事（形状只留一份），
+ * 这样网关改渲染时这一层不会被拖下水。注册路径要验的是「拉到了、注册了一次」。
+ */
 const ONE_LISTED = {
   object: "list",
-  data: [
-    {
-      id: "model-01",
-      display_name: "Model 01",
-      reasoning: true,
-      effort_options: ["off", "low"],
-      context_window: 1000000,
-      max_output_tokens: 384000,
-    },
-  ],
+  data: [{ id: "model-01" }],
 };
 
 /** 上面那份回答注册出去必须长成这样（手写，不由 toV2Payload 生成） */
@@ -191,14 +216,16 @@ const ONE_PAYLOAD: OpencodeV2Payload = {
       id: "model-01",
       modelID: "model-01",
       providerID: "agentfacade",
-      name: "Model 01",
+      // 只有 id 的条目：名字退回 id、窗口 200000/4096（core 的缺省值），
+      // tools 为 true（toolCall=null 时本宿主按支持）、模态是录制里的常量
+      name: "model-01",
       capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
       variants: [],
       time: { released: 0 },
       cost: [],
       status: "active",
       enabled: true,
-      limit: { context: 1000000, output: 384000 },
+      limit: { context: 200000, output: 4096 },
     },
   ],
 };
@@ -262,6 +289,62 @@ check(
 check(
   "capabilities 逐字（tools / input / output）",
   same(toV2Model(SPEC).capabilities, { tools: true, input: ["text", "image"], output: ["text"] }),
+  brief(toV2Model(SPEC).capabilities),
+);
+
+// 工具：网关说「不能」照它；说「不知道」（null）时本宿主按支持 —— 这是宿主的选择
+check(
+  "toolCall=false → capabilities.tools 为 false（网关明确说不能调工具）",
+  toV2Model({ ...SPEC, toolCall: false }).capabilities.tools === false,
+  brief(toV2Model({ ...SPEC, toolCall: false }).capabilities),
+);
+check(
+  "toolCall=null → capabilities.tools 为 true（不知道不等于不能，与 pi 的缺省一致）",
+  toV2Model({ ...SPEC, toolCall: null }).capabilities.tools === true,
+  brief(toV2Model({ ...SPEC, toolCall: null }).capabilities),
+);
+check(
+  "toolCall=true → capabilities.tools 为 true",
+  toV2Model({ ...SPEC, toolCall: true }).capabilities.tools === true,
+  brief(toV2Model({ ...SPEC, toolCall: true }).capabilities),
+);
+
+// 模态：网关报了就以它为准（哪怕只有一个、或一个都不收）；没报才退回录制里的常量
+check(
+  "modalities 有值就用它（不再套录制常量）",
+  same(toV2Model({ ...SPEC, modalities: { input: ["text"], output: ["text"] } }).capabilities, {
+    tools: true,
+    input: ["text"],
+    output: ["text"],
+  }),
+  brief(toV2Model({ ...SPEC, modalities: { input: ["text"], output: ["text"] } }).capabilities),
+);
+check(
+  "modalities 是空数组也照它（input: [] 是网关断言「一个模态都不收」，不是没报）",
+  same(toV2Model({ ...SPEC, modalities: { input: [], output: [] } }).capabilities, {
+    tools: true,
+    input: [],
+    output: [],
+  }),
+  brief(toV2Model({ ...SPEC, modalities: { input: [], output: [] } }).capabilities),
+);
+check(
+  "modalities=null（网关没报）→ 退回录制里的常量 text+image / text",
+  same(toV2Model({ ...SPEC, modalities: null }).capabilities, {
+    tools: true,
+    input: ["text", "image"],
+    output: ["text"],
+  }),
+  brief(toV2Model({ ...SPEC, modalities: null }).capabilities),
+);
+check(
+  "从 spec 取来的模态数组不是同一个引用（改一条不该污染下一条，也不该改调用方的 spec）",
+  (() => {
+    const source: ModelSpec = { ...SPEC, modalities: { input: ["text"], output: ["text"] } };
+    const first = toV2Model(source);
+    first.capabilities.input.push("audio");
+    return source.modalities!.input.length === 1 && toV2Model(source).capabilities.input.length === 1;
+  })(),
   brief(toV2Model(SPEC).capabilities),
 );
 
@@ -415,7 +498,11 @@ console.log("setup（v2 的注册路径）：成功");
   check("成功时 editor.add 只调一次", added.length === 1, String(added.length));
   check("注册的 payload 与手写快照逐字相同", same(added[0], ONE_PAYLOAD), brief(added[0]));
   check("成功时没有警告", warnings.length === 0, JSON.stringify(warnings));
-  check("只打一次 {gateway}/v1/models（不重试、不并发扫多个地址）", same(calls, [MODELS_URL]), JSON.stringify(calls));
+  check(
+    "只打一次 {gateway}/v1/models（不重试、不并发扫多个地址）",
+    same(calls.map(listTarget), [`${GATEWAY}/v1/models`]),
+    JSON.stringify(calls),
+  );
 }
 
 // ── setup：失败路径一律不注册 ────────────────────────────────────────────
@@ -512,7 +599,7 @@ console.log("setup：失败路径不注册（用户配置继续生效）");
     throw new Error("connect ECONNREFUSED");
   });
   const { added, warnings } = await runSetup({ fetchOptions: { fetchImpl: impl } });
-  check("什么都没配时去试默认网关", same(calls, [`${DEFAULT_GATEWAY}/v1/models`]), JSON.stringify(calls));
+  check("什么都没配时去试默认网关", same(calls.map(listTarget), [`${DEFAULT_GATEWAY}/v1/models`]), JSON.stringify(calls));
   check("默认网关连不上时不注册", added.length === 0, String(added.length));
   check(
     "默认地址连不上时警告带地址、环境变量名与配置文件路径",
@@ -597,20 +684,42 @@ console.log("setup：pkg / displayName 选项");
   );
 }
 
-// ── 录制清单的整份快照 ───────────────────────────────────────────────────
+// ── 整份清单的快照 ───────────────────────────────────────────────────────
 
 console.log("");
-console.log("录制清单 → 整份 payload（与手写快照逐字比对）");
+console.log("整份清单 → 整份 payload（与手写快照逐字比对）");
 
-const specs = modelsFromPayload(RECORDED.data);
-check(
-  `录制里有 ${RECORDED.data.length} 条，没有 id 的丢掉 → 归一后 6 条`,
-  specs.length === 6,
-  String(specs.length),
-);
+/**
+ * 快照用例的输入：6 条 ModelSpec —— **宿主的输入**，不是网关的报文。
+ *
+ * 之所以不再放一份录制：宿主的职责是「ModelSpec → 宿主配置」。网关报文的形状只该有一份
+ * （在 core 的测试里）；这一层再抄一份，网关换个渲染就得跟着改，而它一个字段都没变。
+ * 这几条的 id / 名字 / 窗口与 fixtures/expected.ts 那份手写快照一一对应。
+ */
+const SNAPSHOT_SPECS: ModelSpec[] = [
+  spec({ id: "coder-a", displayName: "Coder A", efforts: ["off", "low", "high", "max"], contextWindow: 1000000, maxOutputTokens: 384000 }),
+  spec({ id: "dsh-manager", displayName: "Deepseek Harness Manager", efforts: ["off", "default", "low", "medium", "high", "xhigh", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "flat", displayName: "Flat", reasoning: false, efforts: ["off"], contextWindow: 200000, maxOutputTokens: 4096 }),
+  spec({ id: "bare", displayName: "bare" }),
+  spec({ id: "zeros", displayName: "zeros" }),
+  spec({ id: "weird", displayName: "Weird", efforts: ["high", "off", "midium", "high"], contextWindow: 131072, maxOutputTokens: 32768 }),
+].map((entry) => ({
+  // 快照要的是「网关报过这三项」那一路：能调工具、模态 text+image
+  ...entry,
+  toolCall: true,
+  modalities: { input: ["text", "image"], output: ["text"] },
+}));
 
-const fromFixture = toV2Payload(specs, { baseUrl: GATEWAY, apiKey: API_KEY });
-check("整份 payload 与 fixtures/expected.ts 逐字相同", same(fromFixture, EXPECTED), brief(fromFixture));
+check("快照的输入面是 6 条 ModelSpec", SNAPSHOT_SPECS.length === 6, String(SNAPSHOT_SPECS.length));
+
+const fromSpecs = toV2Payload(SNAPSHOT_SPECS, { baseUrl: GATEWAY, apiKey: API_KEY });
+check("整份 payload 与 fixtures/expected.ts 逐字相同", same(fromSpecs, EXPECTED), brief(fromSpecs));
+
+/**
+ * 假网关的回答：这 6 条，**只给 id**（理由同 ONE_LISTED）。
+ * 注册路径上的用例只需要「拉到了 6 条」，条目细节由上面的映射用例钉。
+ */
+const SNAPSHOT_LISTED = { data: SNAPSHOT_SPECS.map(({ id }) => ({ id })) };
 check(
   "快照里有 6 条模型（上一行不是两个空对象在比）",
   EXPECTED.models.length === 6,
@@ -628,7 +737,7 @@ console.log("");
 console.log("refresh（状态语义：空清单不替换上一次的清单）");
 
 {
-  let body: unknown = RECORDED;
+  let body: unknown = SNAPSHOT_LISTED;
   const { impl } = captureFetch(() => jsonResponse(body));
   const deps = { env: { OPENCODE_FACADE_GATEWAY: GATEWAY }, home: tempHome(), fetchOptions: { fetchImpl: impl } };
   const state = freshState();
@@ -647,7 +756,7 @@ console.log("refresh（状态语义：空清单不替换上一次的清单）");
   check("空清单不替换上一次的清单（还是那 6 条）", goodModels() === 6, String(goodModels()));
   check("空清单那次留下 lastError", (state.lastError ?? "").includes("listed no models"), String(state.lastError));
 
-  body = RECORDED;
+  body = SNAPSHOT_LISTED;
   await refresh(state, deps);
 
   const controller = new AbortController();
@@ -735,7 +844,7 @@ check("超时预算是 1500ms（启动路径上被 await 的那个数）", DEFAU
   // 配置文件里那一级真的会变成请求地址（不是只有 resolveGateway 认得）
   const { impl, calls } = captureFetch(() => jsonResponse(ONE_LISTED));
   await runSetup({ fetchOptions: { fetchImpl: impl }, pluginOptions: { home } });
-  check("配置文件里的地址被真的拿去请求", same(calls, ["http://from-config.example:6450/v1/models"]), JSON.stringify(calls));
+  check("配置文件里的地址被真的拿去请求", same(calls.map(listTarget), ["http://from-config.example:6450/v1/models"]), JSON.stringify(calls));
 }
 
 {
@@ -745,7 +854,7 @@ check("超时预算是 1500ms（启动路径上被 await 的那个数）", DEFAU
     env: { OPENCODE_FACADE_GATEWAY: "", FACADE_GATEWAY: "http://facade.example:6450" },
     fetchOptions: { fetchImpl: impl },
   });
-  check("空的宿主变量被跳过，落到 FACADE_GATEWAY", same(calls, ["http://facade.example:6450/v1/models"]), JSON.stringify(calls));
+  check("空的宿主变量被跳过，落到 FACADE_GATEWAY", same(calls.map(listTarget), ["http://facade.example:6450/v1/models"]), JSON.stringify(calls));
 }
 
 // ── 插件导出形状 + 归属规则 ───────────────────────────────────────────────

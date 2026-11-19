@@ -1,0 +1,74 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "model-01",
+      "object": "model",
+      "created": 1795086690,
+      "owned_by": "facade-go",
+      "name": "Model 01",
+      "limit": { "context": 1000000, "output": 384000 },
+      "capabilities": {
+        "tools": { "supported": true },
+        "reasoning": { "supported": true, "effort": ["off", "low", "high", "max"] }
+      },
+      "modalities": {
+        "input": ["text", "image/jpeg", "image/png", "image/gif", "image/webp"],
+        "output": ["text"]
+      },
+      "cost": {
+        "text": {
+          "input": { "price": 0.15, "cache": { "read": 0.003 } },
+          "output": { "price": 0.6 }
+        }
+      }
+    },
+    {
+      "id": "model-02",
+      "object": "model",
+      "created": 1795086691,
+      "owned_by": "facade-go",
+      "name": "Model 02",
+      "limit": { "context": 200000, "output": 128000 },
+      "capabilities": {
+        "tools": { "supported": true },
+        "reasoning": {
+          "supported": true,
+          "effort": ["off", "default", "low", "medium", "high", "xhigh", "max"]
+        }
+      },
+      "modalities": { "input": ["text"], "output": ["text"] },
+      "cost": {
+        "text": {
+          "input": { "price": 1.25, "cache": { "read": 0.125 } },
+          "output": { "price": 10 }
+        }
+      }
+    },
+    {
+      "id": "model-03",
+      "object": "model",
+      "created": 1795086692,
+      "owned_by": "facade-go",
+      "name": "Model 03",
+      "limit": { "context": 128000, "output": 16384 },
+      "capabilities": {
+        "tools": { "supported": false },
+        "reasoning": { "supported": false }
+      },
+      "modalities": { "input": ["text"], "output": ["text"] },
+      "cost": {
+        "text": {
+          "input": { "price": 0, "cache": { "read": 0 } },
+          "output": { "price": 0 }
+        }
+      }
+    },
+    {
+      "id": "model-04",
+      "object": "model",
+      "created": 1795086693,
+      "owned_by": "facade-go"
+    }
+  ]
+}

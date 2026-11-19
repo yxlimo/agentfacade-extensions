@@ -75,16 +75,16 @@ configured plugin path must be a directory
 | `info.settings.apiKey` | 固定 `public`（网关跑 public 模式时不校验） |
 | `models[].id` / `.modelID` | 同一个 `id`（v2 用这两格拼模型引用） |
 | `models[].providerID` | `agentfacade` |
-| `models[].name` | `display_name`（缺了用 `id`）。**必须覆盖**：`Model.Info.default()` 给的是裸 id，不改的话选择器里全是 `coder-a` 这种机器名 |
-| `models[].limit.context` / `.output` | `context_window` / `max_output_tokens`（缺省 200000 / 4096 由 core 补） |
-| `models[].capabilities.tools` | 固定 `true` |
-| `models[].capabilities.input` | 固定 `["text", "image"]`（录制里 16 个模型全是这两项，按事实填） |
-| `models[].capabilities.output` | 固定 `["text"]` |
+| `models[].name` | `displayName`（core 归一过：网关没给名字时它退回 `id`）。**必须覆盖**：`Model.Info.default()` 给的是裸 id，不改的话选择器里全是 `coder-a` 这种机器名 |
+| `models[].limit.context` / `.output` | `contextWindow` / `maxOutputTokens`（缺省 200000 / 4096 由 core 补） |
+| `models[].capabilities.tools` | `toolCall`。网关说不能就 `false`；**没说（`null`）按支持** —— 与 pi 的缺省一致，不知道不等于不能（这是宿主的选择） |
+| `models[].capabilities.input` / `.output` | `modalities` 有就用它（连 `input: []`「一个都不收」也照它的来）；网关没报（`null`）才退回录制里的常量 `["text","image"]` / `["text"]` —— 退回的是录制里的事实，不是推断 |
 | `models[].variants` | 恒 `[]`，见「已知缺口」 |
 | `models[].status` / `.enabled` / `.time` / `.cost` | `"active"` / `true` / `{released: 0}` / `[]` |
 
-期望值在 `fixtures/expected.ts` 里是**手写快照**（由 `fixtures/gateway-v1-models.json` 那份录制人工
-推导）。改映射必须同时改它 —— 两边一起动是刻意的，否则「映射改了但测试还绿」。
+期望值在 `fixtures/expected.ts` 里是**手写快照**（由 `test/check.ts` 里那份 `SNAPSHOT_SPECS`——
+6 条显式 `ModelSpec`——人工推导）。改映射必须同时改它 —— 两边一起动是刻意的，否则「映射改了
+但测试还绿」。
 
 ## 已知缺口：档位（reasoning efforts）目前不表达
 
@@ -144,7 +144,7 @@ v1 的模型定义里有 `capabilities.reasoning.{supported, effort}`，**v2 没
 ## 测
 
 ```bash
-node --experimental-strip-types hosts/opencode/test/check.ts       # 88 条断言
+node --experimental-strip-types hosts/opencode/test/check.ts       # 95 条断言
 node node_modules/typescript/bin/tsc --noEmit -p hosts/opencode/tsconfig.json
 ```
 
@@ -160,7 +160,7 @@ node node_modules/typescript/bin/tsc --noEmit -p hosts/opencode/tsconfig.json
 - 地址优先级、`pkg` / `displayName` 选项
 - 「源码里没有写文件的 API / 没有网关协议词汇」两条扫描
 
-`fixtures/gateway-v1-models.json` 是合成清单（id 与显示名是假的，文件名里的 `v1` 是**网关**的
-`/v1/models`，不是插件 v1），覆盖映射真正要处理的形状：`off` 单独一档、四档齐全、夹着
-`default`/`xhigh` 的七档、`midium` 这种拼错的档位、重复档位、只有 `off` 的模型、什么字段都没给的
-模型、`context_window: 0`、数字字符串、以及一条没有 id 的。
+期望值分两处：`test/check.ts` 里的 `SNAPSHOT_SPECS`（**6 条显式 `ModelSpec`**，宿主的输入面）
+与 `fixtures/expected.ts`（手写快照）。**这里没有网关报文的拷贝** —— 条目字段长什么样是 core 的
+事，形状只留一份（在 core 的测试里）。注册路径那几条用例只需要「拉到了 N 条」，所以假网关只回
+`{ data: [{ id }] }`：条目其余字段由 core 归一，不在这里重复声明。

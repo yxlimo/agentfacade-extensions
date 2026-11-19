@@ -48,7 +48,8 @@ dsh 的生效途径是宿主自己的设置 API：`ctx.settings`（落到 profil
 ## 映射：ModelSpec → llm-pi-ai provider profile
 
 ```text
-ModelSpec { id, displayName, reasoning, efforts[], contextWindow, maxOutputTokens }
+ModelSpec { id, displayName, reasoning, efforts[], contextWindow, maxOutputTokens,
+            toolCall: boolean | null, modalities | null, cost | null }
   → { displayName, api, baseURL, apiKeyEnv,
       models: [{ id, name, contextWindow, maxTokens, reasoningEfforts? }] }
 ```
@@ -64,6 +65,9 @@ ModelSpec { id, displayName, reasoning, efforts[], contextWindow, maxOutputToken
   - 网关声明了 dsh 不认识的拼写（真网关出现过 `midium`）→ 丢掉；
   - 交集为空 → **整个字段省略**（不是 `[]`、也不是 `{}`）：省略 = 沿用已安装目录的能力声明。
 - 缺省值（context 200000 / output 4096）由 core 负责，是所有宿主共享的网关约定。
+- `toolCall` / `modalities` / `cost` 在这一版 llm-pi-ai 的 provider profile 里**没有对应的格子**，
+  所以映射不表达它们（不是漏了、也不是被 0 抹平 —— core 交出来的区别还在，只是这个宿主没处放）。
+  哪天 profile 支持了再在这里加，别在 core 里替它补默认值。
 - `apiKeyEnv` 只放**环境变量名**（默认 `AGENTFACADE_API_KEY`），密钥本身绝不进配置。
 
 ## 失败行为

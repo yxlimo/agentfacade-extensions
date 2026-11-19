@@ -1,8 +1,8 @@
 // 期望的 provider 配置：**手写快照**，不由任何程序生成。
 //
 // 改 catalog.ts 的映射就要同步改这里 —— 两边一起动是刻意的，否则「映射改了但
-// 测试还绿」。要重录：对着 fixtures/gateway-v1-models.json 那份录制，按新映射
-// 逐条改，不许再写脚本自动生成。
+// 测试还绿」。输入面是 test/check.ts 里那份 SPECS（17 条显式 ModelSpec）；改映射时
+// 对着它逐条改这份快照，不许写脚本自动生成。
 
 import type { PiProviderConfig } from "../catalog.ts";
 

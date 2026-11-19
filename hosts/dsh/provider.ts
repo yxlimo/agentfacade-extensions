@@ -8,7 +8,8 @@
 //     于是 settings.mutate 必然失败，宿主完全不可用）；
 //   · 值 = 该档位在协议里发送的拼写，off 允许 null（null = 什么也不发）；
 //   · 字段整体省略 = 沿用已安装目录里的能力声明。
-// 所以网关的 effort_options 要与这七个词求交集：未知拼写（真网关出现过 midium）丢掉；
+// 所以网关报的档位（`capabilities.reasoning.effort`）要与这七个词求交集：未知拼写
+// （真网关出现过 midium）丢掉；
 // 交集为空就整个字段省略。core 的 efforts 保持原样（那是网关的形状）—— 收敛成宿主
 // 自己的阶梯是宿主的事，dsh 的阶梯就是这张封闭表。
 //
@@ -53,7 +54,7 @@ export type DshEffort = (typeof DSH_EFFORTS)[number];
 export type ReasoningEffortsProfile = Partial<Record<DshEffort, string | null>>;
 
 /**
- * 网关 effort_options → llm-pi-ai 的 reasoningEfforts（dict 形态）。
+ * 网关报的档位（`capabilities.reasoning.effort`）→ llm-pi-ai 的 reasoningEfforts（dict 形态）。
  *
  * 契约规则（写错一条宿主就整个不可用，实测过）：
  *   · 只留 dsh 认识的七个档位；未知拼写丢掉（midium 这种上游真会发）；

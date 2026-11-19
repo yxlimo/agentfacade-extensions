@@ -20,6 +20,30 @@ export interface ModelSpec {
   efforts: string[];
   contextWindow: number;
   maxOutputTokens: number;
+  /**
+   * 网关声明能不能调工具；`null` 是「没人说」，不是「不能」。
+   *
+   * 与 `reasoning` 不同：思考没声明按「支持」处理（缺省开），工具调用没声明就是不知道 ——
+   * 宿主各自决定「不知道」时怎么办，core 不替它猜。
+   */
+  toolCall: boolean | null;
+  /**
+   * 模态，`null` 是网关没报。空数组与缺省要分开：`input: []` 是「一个模态都不收」，
+   * 那是网关的断言，不是我们该替它填的。
+   */
+  modalities: { input: string[]; output: string[] } | null;
+  /**
+   * 价格，**每百万 token、美元**（网关就是这么报的，core 不缩放、不换算币种）。
+   *
+   * 字段可缺：只报输出价时输入那侧不出现 —— 0 元与没报价是两件事，不能互相顶替。
+   * 宿主把它翻成自己的形状（pi 要 `{input, output, cacheRead, cacheWrite}`，别的宿主可能
+   * 只要一个总价），但「哪一侧没报价」这一事实必须传到宿主，不许在 core 里被 0 抹平。
+   */
+  cost: {
+    inputPerMillion?: number;
+    outputPerMillion?: number;
+    cacheReadPerMillion?: number;
+  } | null;
 }
 
 /**

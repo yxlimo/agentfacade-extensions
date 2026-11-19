@@ -16,12 +16,15 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
   modelsFromPayload,
+  normalizeCost,
   normalizeEfforts,
+  normalizeModalities,
   normalizeReasoning,
   toModelSpec,
 } from "../catalog.ts";
 import {
   DEFAULT_TIMEOUT_MS,
+  MODELS_DIALECT,
   fetchCatalog,
   fetchModelList,
   modelsUrl,
@@ -33,6 +36,33 @@ import type { HostAdapter, ModelSpec } from "../types.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CORE_DIR = path.join(HERE, "..");
 
+// 网关报文的形状只有 fixtures/gateway-openai.json 一处：用例从它取一条再改单格，
+// 不在每个用例里重抄整份 payload —— 重抄的那份迟早和网关的真实形状分叉，而重抄的用例照样绿。
+type GatewayPayload = { object: string; data: Array<Record<string, unknown>> };
+const FIXTURE = JSON.parse(
+  fs.readFileSync(path.join(HERE, "fixtures", "gateway-openai.json"), "utf8"),
+) as GatewayPayload;
+
+/** 取 fixture 里的一条模型，深拷贝一份随便改（共享同一个对象会被上一条用例改坏） */
+function row(id: string): Record<string, unknown> {
+  const found = FIXTURE.data.find((item) => item.id === id);
+  if (!found) throw new Error(`fixture 里没有 ${id}`);
+  return structuredClone(found);
+}
+
+/** 改 fixture 一条模型的某一格，用来造「网关没报这一格 / 报了个怪值」的变体 */
+function withField(base: Record<string, unknown>, key: string, value: unknown): Record<string, unknown> {
+  const copy = structuredClone(base);
+  copy[key] = value;
+  return copy;
+}
+
+/** 整格拿掉：模拟网关没发这一层（缺失与「发了个空对象」在语义上不同） */
+function without(base: Record<string, unknown>, key: string): Record<string, unknown> {
+  const copy = structuredClone(base);
+  delete copy[key];
+  return copy;
+}
 let pass = 0;
 let fail = 0;
 
@@ -77,39 +107,123 @@ const hangFetch = (async (_input: unknown, init?: RequestInit) =>
 
 // ── 字段归一化 ───────────────────────────────────────────────────────────
 
-console.log("toModelSpec（逐字快照）");
+console.log("toModelSpec（逐字快照，openai 渲染）");
 
 check(
-  "完整字段原样搬过来",
-  same(toModelSpec({
-    id: "model-01",
-    display_name: "Model 01",
-    reasoning: true,
-    effort_options: ["off", "low", "high", "max"],
-    context_window: 1000000,
-    max_output_tokens: 384000,
-  }), {
+  "完整一条：能力/上限/模态/报价各就各位（fixture 的 model-01）",
+  same(toModelSpec(row("model-01")), {
     id: "model-01",
     displayName: "Model 01",
     reasoning: true,
     efforts: ["off", "low", "high", "max"],
     contextWindow: 1000000,
     maxOutputTokens: 384000,
+    toolCall: true,
+    modalities: {
+      input: ["text", "image/jpeg", "image/png", "image/gif", "image/webp"],
+      output: ["text"],
+    },
+    cost: { inputPerMillion: 0.15, cacheReadPerMillion: 0.003, outputPerMillion: 0.6 },
   }),
-  JSON.stringify(toModelSpec({ id: "x" })),
+  JSON.stringify(toModelSpec(row("model-01"))),
 );
 
 check(
-  "context_window / max_output_tokens 缺失 → 200000 / 4096",
-  same(toModelSpec({ id: "no-limits" }), {
-    id: "no-limits",
-    displayName: "no-limits",
+  "整份 fixture 逐字（含只有 id 的那条：三层全缺时的回落一起钉住）",
+  same(modelsFromPayload(FIXTURE.data), [
+    {
+      id: "model-01",
+      displayName: "Model 01",
+      reasoning: true,
+      efforts: ["off", "low", "high", "max"],
+      contextWindow: 1000000,
+      maxOutputTokens: 384000,
+      toolCall: true,
+      modalities: {
+        input: ["text", "image/jpeg", "image/png", "image/gif", "image/webp"],
+        output: ["text"],
+      },
+      cost: { inputPerMillion: 0.15, cacheReadPerMillion: 0.003, outputPerMillion: 0.6 },
+    },
+    {
+      id: "model-02",
+      displayName: "Model 02",
+      reasoning: true,
+      efforts: ["off", "default", "low", "medium", "high", "xhigh", "max"],
+      contextWindow: 200000,
+      maxOutputTokens: 128000,
+      toolCall: true,
+      modalities: { input: ["text"], output: ["text"] },
+      cost: { inputPerMillion: 1.25, cacheReadPerMillion: 0.125, outputPerMillion: 10 },
+    },
+    {
+      id: "model-03",
+      displayName: "Model 03",
+      reasoning: false,
+      efforts: [],
+      contextWindow: 128000,
+      maxOutputTokens: 16384,
+      toolCall: false,
+      modalities: { input: ["text"], output: ["text"] },
+      cost: { inputPerMillion: 0, cacheReadPerMillion: 0, outputPerMillion: 0 },
+    },
+    {
+      id: "model-04",
+      displayName: "model-04",
+      reasoning: true,
+      efforts: [],
+      contextWindow: 200000,
+      maxOutputTokens: 4096,
+      toolCall: null,
+      modalities: null,
+      cost: null,
+    },
+  ]),
+  JSON.stringify(modelsFromPayload(FIXTURE.data)),
+);
+
+check(
+  "缺 capabilities 整层：思考按 true、档位空、toolCall 是 null（不是 false，也不是 true）",
+  same(toModelSpec(without(row("model-01"), "capabilities")), {
+    id: "model-01",
+    displayName: "Model 01",
     reasoning: true,
     efforts: [],
-    contextWindow: 200000,
-    maxOutputTokens: 4096,
+    contextWindow: 1000000,
+    maxOutputTokens: 384000,
+    toolCall: null,
+    modalities: {
+      input: ["text", "image/jpeg", "image/png", "image/gif", "image/webp"],
+      output: ["text"],
+    },
+    cost: { inputPerMillion: 0.15, cacheReadPerMillion: 0.003, outputPerMillion: 0.6 },
   }),
-  JSON.stringify(toModelSpec({ id: "no-limits" })),
+  JSON.stringify(toModelSpec(without(row("model-01"), "capabilities"))),
+);
+
+check(
+  "缺 limit 整层 → 200000 / 4096（不连带影响能力字段）",
+  same(
+    [
+      toModelSpec(without(row("model-01"), "limit")).contextWindow,
+      toModelSpec(without(row("model-01"), "limit")).maxOutputTokens,
+      toModelSpec(without(row("model-01"), "limit")).toolCall,
+    ],
+    [200000, 4096, true],
+  ),
+  JSON.stringify(toModelSpec(without(row("model-01"), "limit"))),
+);
+
+check(
+  "缺 name / name 是空串 → displayName 回落 id",
+  same(
+    [toModelSpec(without(row("model-01"), "name")).displayName, toModelSpec(withField(row("model-01"), "name", "")).displayName],
+    ["model-01", "model-01"],
+  ),
+  JSON.stringify([
+    toModelSpec(without(row("model-01"), "name")).displayName,
+    toModelSpec(withField(row("model-01"), "name", "")).displayName,
+  ]),
 );
 
 check(
@@ -119,52 +233,76 @@ check(
 );
 
 check(
-  "上限写 0 也算「没说」（0 是网关表达没填的方式，不是零窗口）",
-  toModelSpec({ id: "zeros", context_window: 0, max_output_tokens: 0 }).contextWindow === 200000 &&
-    toModelSpec({ id: "zeros", context_window: 0, max_output_tokens: 0 }).maxOutputTokens === 4096,
-  JSON.stringify(toModelSpec({ id: "zeros", context_window: 0, max_output_tokens: 0 })),
+  "limit 写 0 也算「没说」（0 是网关表达没填的方式，不是零窗口）",
+  same(
+    [
+      toModelSpec(withField(row("model-01"), "limit", { context: 0, output: 0 })).contextWindow,
+      toModelSpec(withField(row("model-01"), "limit", { context: 0, output: 0 })).maxOutputTokens,
+    ],
+    [200000, 4096],
+  ),
+  JSON.stringify(toModelSpec(withField(row("model-01"), "limit", { context: 0, output: 0 }))),
 );
 
 check(
-  "上限是数字字符串也认（网关有些字段是字符串）",
-  toModelSpec({ id: "s", context_window: "131072", max_output_tokens: "32768" }).contextWindow === 131072,
-  String(toModelSpec({ id: "s", context_window: "131072" }).contextWindow),
+  "limit 里是数字字符串也认（网关有些字段是字符串）",
+  toModelSpec(withField(row("model-01"), "limit", { context: "131072", output: "32768" })).contextWindow === 131072,
+  String(toModelSpec(withField(row("model-01"), "limit", { context: "131072", output: "32768" })).contextWindow),
 );
 
 check(
-  "display_name 缺失或为空 → displayName 用 id",
-  toModelSpec({ id: "bare" }).displayName === "bare" && toModelSpec({ id: "blank", display_name: "" }).displayName === "blank",
-  JSON.stringify([toModelSpec({ id: "bare" }).displayName, toModelSpec({ id: "blank", display_name: "" }).displayName]),
+  "reasoning.supported 未声明 → true（不知道不等于不支持）",
+  toModelSpec(withField(row("model-03"), "capabilities", { tools: { supported: true } })).reasoning === true,
+  String(toModelSpec(withField(row("model-03"), "capabilities", { tools: { supported: true } })).reasoning),
 );
 
 check(
-  "reasoning 未声明 → true（不知道不等于不支持）",
-  toModelSpec({ id: "mystery" }).reasoning === true,
-  String(toModelSpec({ id: "mystery" }).reasoning),
+  "reasoning.supported 不是布尔（字符串）也按「不知道」→ true，不当成 false",
+  toModelSpec(withField(row("model-03"), "capabilities", { tools: { supported: true }, reasoning: { supported: "yes" } }))
+    .reasoning === true,
+  JSON.stringify(
+    toModelSpec(withField(row("model-03"), "capabilities", { tools: { supported: true }, reasoning: { supported: "yes" } }))
+      .reasoning,
+  ),
 );
 
 check(
-  "reasoning 不是布尔（比如字符串）也按「不知道」→ true，不当成 false",
-  toModelSpec({ id: "wobbly", reasoning: "yes" }).reasoning === true,
-  JSON.stringify(toModelSpec({ id: "wobbly", reasoning: "yes" }).reasoning),
+  "reasoning.supported: false 保留 false（fixture 的 model-03）",
+  toModelSpec(row("model-03")).reasoning === false,
+  String(toModelSpec(row("model-03")).reasoning),
 );
 
 check(
-  "reasoning: false 保留 false",
-  toModelSpec({ id: "flat", reasoning: false }).reasoning === false,
-  String(toModelSpec({ id: "flat", reasoning: false }).reasoning),
+  "tools.supported: false 是 false，缺失是 null —— 「不能」与「不知道」不能混成一格",
+  same([toModelSpec(row("model-03")).toolCall, toModelSpec(row("model-04")).toolCall], [false, null]),
+  JSON.stringify([toModelSpec(row("model-03")).toolCall, toModelSpec(row("model-04")).toolCall]),
 );
 
 check(
-  "档位原样：不排序、不改拼写、不去重",
-  same(toModelSpec({ id: "e", effort_options: ["high", "off", "midium", "high"] }).efforts, ["high", "off", "midium", "high"]),
-  JSON.stringify(toModelSpec({ id: "e", effort_options: ["high", "off", "midium", "high"] }).efforts),
+  "档位原样：不排序、不改拼写（midium 是真实拼写，不许纠正）、不去重",
+  same(
+    toModelSpec(
+      withField(row("model-03"), "capabilities", {
+        tools: { supported: true },
+        reasoning: { supported: true, effort: ["off", "midium", "high"] },
+      }),
+    ).efforts,
+    ["off", "midium", "high"],
+  ),
+  JSON.stringify(
+    toModelSpec(
+      withField(row("model-03"), "capabilities", {
+        tools: { supported: true },
+        reasoning: { supported: true, effort: ["off", "midium", "high"] },
+      }),
+    ).efforts,
+  ),
 );
 
 check(
-  "档位缺省 → 空数组（不补 off、不补任何一档）",
-  same(toModelSpec({ id: "e" }).efforts, []),
-  JSON.stringify(toModelSpec({ id: "e" }).efforts),
+  "档位缺省 → 空数组（不补 off、不补任何一档；model-03 报了 reasoning 但没有 effort）",
+  same(toModelSpec(row("model-03")).efforts, []),
+  JSON.stringify(toModelSpec(row("model-03")).efforts),
 );
 
 check(
@@ -187,13 +325,86 @@ check(
 
 check("normalizeReasoning 只认布尔", normalizeReasoning(true) === true && normalizeReasoning(0) === null, JSON.stringify([normalizeReasoning(true), normalizeReasoning(0)]));
 
+check(
+  "模态只有 input 一侧 → 整格 null（不拿 [] 顶替 output：那是替网关宣布「不收」）",
+  toModelSpec(withField(row("model-01"), "modalities", { input: ["text"] })).modalities === null &&
+    normalizeModalities({ input: ["text"] }) === null,
+  JSON.stringify([
+    toModelSpec(withField(row("model-01"), "modalities", { input: ["text"] })).modalities,
+    normalizeModalities({ output: ["text"] }),
+  ]),
+);
+
+check(
+  "模态两侧都是空数组 → 原样保留（空数组是网关的断言，缺省才是「没说」）",
+  same(toModelSpec(withField(row("model-01"), "modalities", { input: [], output: [] })).modalities, {
+    input: [],
+    output: [],
+  }),
+  JSON.stringify(toModelSpec(withField(row("model-01"), "modalities", { input: [], output: [] })).modalities),
+);
+
+check(
+  "模态里有非字符串项 → 整格 null（不是滤掉杂项后照样收）",
+  toModelSpec(withField(row("model-01"), "modalities", { input: ["text", 5], output: ["text"] })).modalities === null,
+  JSON.stringify(toModelSpec(withField(row("model-01"), "modalities", { input: ["text", 5], output: ["text"] })).modalities),
+);
+
+check(
+  "报价全 0 仍然是报价：cost 是三键全 0 的对象，不是 null（免费 ≠ 没报价）",
+  same(toModelSpec(row("model-03")).cost, { inputPerMillion: 0, cacheReadPerMillion: 0, outputPerMillion: 0 }),
+  JSON.stringify(toModelSpec(row("model-03")).cost),
+);
+
+check(
+  "只报输出价 → cost 里没有 inputPerMillion 这个键，也不拿 0 补上",
+  same(toModelSpec(withField(row("model-01"), "cost", { text: { output: { price: 2 } } })).cost, {
+    outputPerMillion: 2,
+  }) &&
+    !Object.hasOwn(
+      toModelSpec(withField(row("model-01"), "cost", { text: { output: { price: 2 } } })).cost ?? {},
+      "inputPerMillion",
+    ) &&
+    !Object.hasOwn(
+      toModelSpec(withField(row("model-01"), "cost", { text: { output: { price: 2 } } })).cost ?? {},
+      "cacheReadPerMillion",
+    ),
+  JSON.stringify(toModelSpec(withField(row("model-01"), "cost", { text: { output: { price: 2 } } })).cost),
+);
+
+check(
+  "cost 缺失 / 空对象 / 价格不是数字 → null（都是「没报价」）",
+  same(
+    [
+      toModelSpec(row("model-04")).cost,
+      toModelSpec(withField(row("model-01"), "cost", { text: {} })).cost,
+      toModelSpec(withField(row("model-01"), "cost", { text: { input: { price: "0.15" } } })).cost,
+    ],
+    [null, null, null],
+  ),
+  JSON.stringify([
+    toModelSpec(row("model-04")).cost,
+    toModelSpec(withField(row("model-01"), "cost", { text: {} })).cost,
+    toModelSpec(withField(row("model-01"), "cost", { text: { input: { price: "0.15" } } })).cost,
+  ]),
+);
+
+check(
+  "normalizeCost 只收报了的键（每百万 token 的美元价，原样不缩放）",
+  same(normalizeCost({ text: { input: { price: 3, cache: { read: 0.3 } } } }), {
+    inputPerMillion: 3,
+    cacheReadPerMillion: 0.3,
+  }),
+  JSON.stringify(normalizeCost({ text: { input: { price: 3, cache: { read: 0.3 } } } })),
+);
+
 console.log("");
 console.log("modelsFromPayload");
 
 check(
   "没有 id 的项跳过",
-  same(modelsFromPayload([{ id: "" }, { display_name: "no id" }, { id: "kept" }]).map((m) => m.id), ["kept"]),
-  JSON.stringify(modelsFromPayload([{ id: "" }, { display_name: "no id" }, { id: "kept" }])),
+  same(modelsFromPayload([{ id: "" }, { name: "no id" }, { id: "kept" }]).map((m) => m.id), ["kept"]),
+  JSON.stringify(modelsFromPayload([{ id: "" }, { name: "no id" }, { id: "kept" }])),
 );
 
 check("空清单 → 空数组（「空」的判定由调用方做，不是这里编一条模型出来）", modelsFromPayload([]).length === 0);
@@ -298,7 +509,18 @@ check(
   JSON.stringify(resolveGateway({ candidates: [{ from: "FIRST", value: "" }], fallback: "http://fb.example:6450" })),
 );
 
-check("模型清单地址是根路径下的 /v1/models", modelsUrl("http://gw.example:6450") === "http://gw.example:6450/v1/models", modelsUrl("http://gw.example:6450"));
+check(
+  "清单地址锁定 openai 方言（不依赖网关那边的默认值）",
+  modelsUrl("http://gw.example:6450") === `http://gw.example:6450/v1/models?dialect=${MODELS_DIALECT}` &&
+    MODELS_DIALECT === "openai",
+  modelsUrl("http://gw.example:6450"),
+);
+
+check(
+  "地址自带 query 时用 & 接，不出现两个 ?（第二个 ? 之后的参数网关不看，方言会静默失效）",
+  modelsUrl("http://gw.example:6450?token=abc") === "http://gw.example:6450/v1/models?token=abc&dialect=openai",
+  modelsUrl("http://gw.example:6450?token=abc"),
+);
 
 // ── 拉取：成功与各类失败 ──────────────────────────────────────────────────
 
@@ -314,10 +536,23 @@ console.log("fetchModelList / fetchCatalog（注入 fetch，不连网）");
     JSON.stringify(listed),
   );
   check(
-    "打的是 {gateway}/v1/models，GET + accept: application/json",
-    same(calls, [{ url: "http://gw.example:6450/v1/models", method: "GET", accept: "application/json" }]),
+    "打的是 {gateway}/v1/models?dialect=openai，GET + accept: application/json",
+    same(calls, [{ url: "http://gw.example:6450/v1/models?dialect=openai", method: "GET", accept: "application/json" }]),
     JSON.stringify(calls),
   );
+  {
+    // 地址自带 query 时，方言参数必须接在已有参数后面：拼出两个 "?" 的话网关只看到前一段，
+    // 方言静默失效，而请求看起来是成功的（这类失败只在报文解析错位时才暴露）
+    const withQuery = captureFetch(() => jsonResponse({ data: [{ id: "model-01" }] }));
+    await fetchModelList("http://gw.example:6450?token=abc", { fetchImpl: withQuery.impl });
+    check(
+      "地址自带 query 时不拼出第二个 ?，方言仍然生效",
+      same(withQuery.calls, [
+        { url: "http://gw.example:6450/v1/models?token=abc&dialect=openai", method: "GET", accept: "application/json" },
+      ]),
+      JSON.stringify(withQuery.calls),
+    );
+  }
 }
 
 {
@@ -325,7 +560,7 @@ console.log("fetchModelList / fetchCatalog（注入 fetch，不连网）");
   const listed = await fetchModelList("http://gw.example:6450", { fetchImpl: impl });
   check(
     "非 JSON 报「did not answer a JSON object」",
-    !listed.ok && (listed as { error: string }).error === 'http://gw.example:6450/v1/models did not answer a JSON object',
+    !listed.ok && (listed as { error: string }).error === 'http://gw.example:6450/v1/models?dialect=openai did not answer a JSON object',
     JSON.stringify(listed),
   );
 }
@@ -335,7 +570,7 @@ console.log("fetchModelList / fetchCatalog（注入 fetch，不连网）");
   const listed = await fetchModelList("http://gw.example:6450", { fetchImpl: impl });
   check(
     "没有 data 那一格报「no \"data\" list」而不是当成空清单",
-    !listed.ok && (listed as { error: string }).error === 'http://gw.example:6450/v1/models has no "data" list',
+    !listed.ok && (listed as { error: string }).error === 'http://gw.example:6450/v1/models?dialect=openai has no "data" list',
     JSON.stringify(listed),
   );
 }
@@ -345,7 +580,7 @@ console.log("fetchModelList / fetchCatalog（注入 fetch，不连网）");
   const listed = await fetchModelList("http://gw.example:6450", { fetchImpl: impl });
   check(
     "HTTP 500 报状态码",
-    !listed.ok && (listed as { error: string }).error === "http://gw.example:6450/v1/models answered HTTP 500",
+    !listed.ok && (listed as { error: string }).error === "http://gw.example:6450/v1/models?dialect=openai answered HTTP 500",
     JSON.stringify(listed),
   );
 }
@@ -359,7 +594,7 @@ console.log("fetchModelList / fetchCatalog（注入 fetch，不连网）");
     "连不上报「unreachable」并带上原因，不抛",
     !listed.ok &&
       (listed as { error: string }).error ===
-        "http://gw.example:6450/v1/models unreachable: connect ECONNREFUSED 127.0.0.1:6450",
+        "http://gw.example:6450/v1/models?dialect=openai unreachable: connect ECONNREFUSED 127.0.0.1:6450",
     JSON.stringify(listed),
   );
 }
@@ -370,7 +605,7 @@ console.log("fetchModelList / fetchCatalog（注入 fetch，不连网）");
   const elapsed = Date.now() - started;
   check(
     "永不响应的上游按超时报失败",
-    !listed.ok && (listed as { error: string }).error === "http://gw.example:6450/v1/models timed out after 150ms",
+    !listed.ok && (listed as { error: string }).error === "http://gw.example:6450/v1/models?dialect=openai timed out after 150ms",
     JSON.stringify(listed),
   );
   check(`超时时间被遵守（${elapsed}ms，下限 140ms）`, elapsed >= 140 && elapsed < 800, `${elapsed}ms`);
@@ -401,7 +636,8 @@ console.log("fetchModelList / fetchCatalog（注入 fetch，不连网）");
 check("core 的默认超时是 5 秒（启动路径上的调用方必须自己传更小的数）", DEFAULT_TIMEOUT_MS === 5000, String(DEFAULT_TIMEOUT_MS));
 
 {
-  const { impl } = captureFetch(() => jsonResponse({ data: [{ id: "model-01", display_name: "Model 01" }] }));
+  // 用 fixture 里只有 id 的那条走一遍端到端：网关回的真实形状，三层缺省一起落到 ModelSpec
+  const { impl } = captureFetch(() => jsonResponse({ object: "list", data: [row("model-04")] }));
   const catalog = await fetchCatalog("http://gw.example:6450", { fetchImpl: impl });
   check(
     "fetchCatalog 交出归一化后的 ModelSpec（逐字）",
@@ -409,12 +645,15 @@ check("core 的默认超时是 5 秒（启动路径上的调用方必须自己�
       ok: true,
       specs: [
         {
-          id: "model-01",
-          displayName: "Model 01",
+          id: "model-04",
+          displayName: "model-04",
           reasoning: true,
           efforts: [],
           contextWindow: 200000,
           maxOutputTokens: 4096,
+          toolCall: null,
+          modalities: null,
+          cost: null,
         },
       ],
     }),
@@ -427,14 +666,14 @@ check("core 的默认超时是 5 秒（启动路径上的调用方必须自己�
   const catalog = await fetchCatalog("http://gw.example:6450", { fetchImpl: impl });
   check(
     "空清单是失败（不是 ok + 0 条），文案说 listed no models",
-    same(catalog, { ok: false, cancelled: false, error: "http://gw.example:6450/v1/models listed no models" }),
+    same(catalog, { ok: false, cancelled: false, error: "http://gw.example:6450/v1/models?dialect=openai listed no models" }),
     JSON.stringify(catalog),
   );
 }
 
 {
   // 有 data 但每条都没有 id：归一化后是 0 条，同样不能当成「有清单」
-  const { impl } = captureFetch(() => jsonResponse({ data: [{ display_name: "no id" }] }));
+  const { impl } = captureFetch(() => jsonResponse({ data: [{ name: "no id" }] }));
   const catalog = await fetchCatalog("http://gw.example:6450", { fetchImpl: impl });
   check("data 里的项全没有 id 也算空清单", !catalog.ok, JSON.stringify(catalog));
 }
@@ -504,14 +743,14 @@ function deps(overrides: Partial<SyncDeps<HostModel>> = {}): SyncDeps<HostModel>
     same(outcome, {
       ok: false,
       cancelled: false,
-      error: "http://gw.example:6450/v1/models unreachable: connect ECONNREFUSED",
+      error: "http://gw.example:6450/v1/models?dialect=openai unreachable: connect ECONNREFUSED",
       models: ["model-01", "model-02"],
     }),
     JSON.stringify(outcome),
   );
   check("失败时 lastGood 一个元素都没动（同一个数组）", state.lastGood === before, JSON.stringify(state.lastGood));
   check("失败时 lastRefresh 不动（还显示上一次成功的时间）", state.lastRefresh === 1700000000000, String(state.lastRefresh));
-  check("失败时 lastError 写明原因", state.lastError === "http://gw.example:6450/v1/models unreachable: connect ECONNREFUSED", String(state.lastError));
+  check("失败时 lastError 写明原因", state.lastError === "http://gw.example:6450/v1/models?dialect=openai unreachable: connect ECONNREFUSED", String(state.lastError));
   check("失败不清 registered：已经注册出去的东西还在，标志要跟它一致", state.registered === true);
 }
 
@@ -535,7 +774,7 @@ function deps(overrides: Partial<SyncDeps<HostModel>> = {}): SyncDeps<HostModel>
   );
   check(
     "空清单留下的 lastError 说 listed no models",
-    state.lastError === "http://gw.example:6450/v1/models listed no models",
+    state.lastError === "http://gw.example:6450/v1/models?dialect=openai listed no models",
     String(state.lastError),
   );
 }
@@ -579,7 +818,7 @@ function deps(overrides: Partial<SyncDeps<HostModel>> = {}): SyncDeps<HostModel>
   );
   check(
     "取消报 cancelled 而不是失败，交回上一份",
-    same(outcome, { ok: false, cancelled: true, error: "http://gw.example:6450/v1/models cancelled", models: ["model-01"] }),
+    same(outcome, { ok: false, cancelled: true, error: "http://gw.example:6450/v1/models?dialect=openai cancelled", models: ["model-01"] }),
     JSON.stringify(outcome),
   );
   check("取消不动 lastError（这是调用方自己的节流，不是网关出错）", state.lastError === null, String(state.lastError));
@@ -683,6 +922,9 @@ console.log("HostAdapter 契约");
     efforts: ["low", "high"],
     contextWindow: 1000,
     maxOutputTokens: 100,
+    toolCall: null,
+    modalities: null,
+    cost: null,
   };
   const provider = adapter.toProvider([spec], { baseUrl: "http://gw.example:6450", apiKey: "public" });
   check(
@@ -703,7 +945,6 @@ console.log("core 的归属规则（禁用词扫描）");
   // 这条规则平时靠人守，靠人就一定会漏。扫一遍源码是把它变成一条能红的断言
   const FORBIDDEN = [
     "thinkingLevelMap",
-    "capabilities",
     "compat",
     "cordis",
     "/facade-models",
@@ -713,15 +954,23 @@ console.log("core 的归属规则（禁用词扫描）");
     "agentfacade",
     "anthropic",
   ];
+  // `capabilities` 开了一半口子：它是**网关报文**的键（capabilities.reasoning /
+  // capabilities.tools），catalog.ts 必须读它；但它出现在别的 core 文件里、或以 `capabilities:` 的
+  // key 位置出现，就说明宿主的形状漏进了契约。下面那条 key 位置断言是这条口子的补偿。
+  const PAYLOAD_ONLY = "capabilities";
   const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts"];
   const hits: string[] = [];
+  const keyHits: string[] = [];
   for (const file of files) {
     const text = fs.readFileSync(path.join(CORE_DIR, file), "utf8");
     for (const word of FORBIDDEN) {
       if (text.includes(word)) hits.push(`${file}: ${word}`);
     }
+    if (file !== "catalog.ts" && text.includes(PAYLOAD_ONLY)) hits.push(`${file}: ${PAYLOAD_ONLY}`);
+    if (/(^|[\s,{])capabilities\s*:/m.test(text)) keyHits.push(file);
   }
   check("core 的四个源文件里没有宿主词汇", hits.length === 0, JSON.stringify(hits));
+  check("capabilities 只在读报文的位置，没变成我们自己的字段名", keyHits.length === 0, JSON.stringify(keyHits));
   check(
     "扫描确实读到了四个源文件（不然上一行永远绿）",
     files.every((file) => fs.existsSync(path.join(CORE_DIR, file))),

@@ -1,5 +1,8 @@
-// 网关的 /v1/models 响应 → pi 的 provider 配置。这一层只剩 pi 特有的映射：
+// ModelSpec[] → pi 的 provider 配置。这一层只剩 pi 特有的映射：
 // 档位怎么折进 pi 的阶梯、每条模型要带哪些只有 pi 才认的字段（cost / compat）。
+//
+// 输入面是 core 归一过的 ModelSpec，**不是网关报文**：字段名、缺省值、null 的语义都是
+// core/types.ts 那张契约的事，宿主不认识也不该认识网关的渲染。
 //
 // 字段归一化与缺省值**不在这里**：那是 core/catalog.ts 的事（网关的约定，所有宿主共享
 // 同一份）。谁在这边重写一遍，同一份清单在两个宿主里的行为就会分叉。
@@ -8,10 +11,9 @@
 // 改这里就要同步改期望值 —— 两边一起动是刻意的，避免「改了映射但测试还绿」。
 //
 // 有几处看着像 bug，但**不许顺手改**：网关报的档位里有 "default" 时 rank 里查不到，
-// 排在最后，于是 pi 的 max 会映到 "default"（见 fixtures/gateway-v1-models.json 里的
-// model-02）。那是上游报出来的真实形状，改掉就与网关对不上了。
+// 排在最后，于是 pi 的 max 会映到 "default"（见 test/check.ts 里手写 SPECS 的 model-02）。
+// 那是上游报出来的真实形状，改掉就与网关对不上了。
 
-import { modelsFromPayload as specsFromPayload, toModelSpec } from "../../core/catalog.ts";
 import type { ModelSpec } from "../../core/types.ts";
 /** pi 的思考档位，从浅到深。顺序即强弱，字母序会把 high 排到 low 前面 */
 export const PI_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -22,15 +24,33 @@ export type PiLevel = (typeof PI_LEVELS)[number];
 const FULL_EFFORTS = ["low", "medium", "high", "max"];
 
 /**
- * 每条模型都要带的两样：pi 不会替扩展注册的 provider 补它们。
+ * 每条模型都要带的 compat：pi 不会替扩展注册的 provider 补它。
  *
- * cost 全 0：网关不报价，pi 只拿它算「花了多少钱」的统计，0 表示不计价（与
- * models.json 那一路 pi 自己补的默认值相同）。
- * compat：两项都必须下发到模型级 —— 扩展注册路径不读 provider 级的那份。
+ * 两项都必须下发到模型级 —— 扩展注册路径不读 provider 级的那份。
  */
-const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const COMPAT = { forceAdaptiveThinking: true, sendSessionAffinityHeaders: true };
 
+/**
+ * 网关的价格 → pi 的四格 cost。口径就是网关的口径（每百万 token、美元），不缩放、不换算。
+ *
+ * `spec.cost === null` 是「网关没报价」：退回全 0。**0 表示不计价**，与「没报价」在 pi 侧
+ * 不可区分 —— 那是 pi 的成本统计口径（它没有「未知价格」这个状态），不是我们的断言。
+ *
+ * 写缓存价恒为 0：网关只报输入/输出/读缓存三侧，没有写缓存价这一项。按 0 计（宁可少算，
+ * 不虚报）比攥一个数安全。
+ *
+ * 某一侧没报价 → 那一侧也是 0（用 `??` 而不是真值判断：0 元是**有**报价）。四格必须齐，
+ * 缺一格整个 cost 就没意义。
+ */
+function costFor(cost: ModelSpec["cost"]): PiModelEntry["cost"] {
+  if (cost === null) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  return {
+    input: cost.inputPerMillion ?? 0,
+    output: cost.outputPerMillion ?? 0,
+    cacheRead: cost.cacheReadPerMillion ?? 0,
+    cacheWrite: 0,
+  };
+}
 
 /** pi 的一条模型定义 */
 export interface PiModelEntry {
@@ -164,10 +184,6 @@ export function effectiveEfforts(efforts: readonly string[] | null, reasoning: b
   if (reasoning === false) return ["off"];
   return [];
 }
-/** 一条网关 payload → 一条 pi 模型。归一化在 core，这里只补 pi 才认的那几样 */
-export function toPiModel(raw: unknown): PiModelEntry {
-  return toPiModelEntry(toModelSpec(raw));
-}
 
 /**
  * 一条 ModelSpec → 一条 pi 模型。正常路径（core 已经把 payload 归一化过）走这个。
@@ -185,15 +201,11 @@ export function toPiModelEntry(spec: ModelSpec): PiModelEntry {
     contextWindow: spec.contextWindow,
     maxTokens: spec.maxOutputTokens,
     thinkingLevelMap: levelMap(effectiveEfforts(spec.efforts, spec.reasoning)),
-    cost: { ...COST },
+    cost: costFor(spec.cost),
     compat: { ...COMPAT },
   };
 }
 
-/** /v1/models 的 data → provider 的 models。没有 id 的项在 core 那边就丢掉了 */
-export function modelsFromPayload(rawModels: readonly unknown[]): PiModelEntry[] {
-  return specsFromPayload(rawModels).map(toPiModelEntry);
-}
 
 /**
  * provider 配置。baseUrl 是**根地址**（不带 /v1）：pi 走 Anthropic 方言，自己拼

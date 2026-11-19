@@ -3,11 +3,12 @@
 //   node --experimental-strip-types hosts/dsh/test/check.ts
 //
 // 覆盖：
-//   · 映射：网关 /v1/models → llm-pi-ai 的 provider profile。期望值**手写**在本文件里
-//     （EXPECTED_PROFILE / EXPECTED_SECTION），不由任何程序生成。
+//   · 映射：ModelSpec[] → llm-pi-ai 的 provider profile。输入是手写的 SPECS（下面那份），
+//     期望值**手写**在本文件里（EXPECTED_PROFILE / EXPECTED_SECTION），不由任何程序生成。
+//     「网关报文长什么样」不在这里 —— 那是 core 的事，形状只留一份。
 //   · 双宿主：一份「最新形态」假宿主（mutate + revision + isVolatilePath）与一份
-//     「旧形态」假宿主（没有 mutate、没有 revision、没有 isVolatilePath）。同一份网关
-//     响应、同一份已有配置，两条路径必须走不同分支（mutate vs replace），互相能证明差异。
+//     「旧形态」假宿主（没有 mutate、没有 revision、没有 isVolatilePath）。同一份模型清单、
+//     同一份已有配置，两条路径必须走不同分支（mutate vs replace），互相能证明差异。
 //   · 失败路径：网关不可达 / HTTP 500 / 非 JSON / 空 data / 全部缺 id → 一律不写。
 //     「上一次成功的清单不会被空清单覆盖」单独立一条。
 //   · 红线：源码里没有一条 fs 写路径（测试直接读源码断言），没有 configEditor。
@@ -32,7 +33,7 @@ import {
   type PiAiProviderProfile,
 } from "../provider.ts";
 import { pickNamespace, probeCapabilities, type SettingsDescriptor, type SettingsHost, type SettingsPathOp } from "../settings-sync.ts";
-import { modelsFromPayload } from "../../../core/catalog.ts";
+import type { ModelSpec } from "../../../core/types.ts";
 import { DEFAULT_GATEWAY, DEFAULT_TIMEOUT_MS, resolveDshGateway } from "../gateway-source.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -261,29 +262,18 @@ function makeHost(initial: readonly SettingsDescriptor[], shapes: HostShapes): F
   };
 }
 
-// ── 网关响应（手写样本，字段名是网关的字段名）─────────────────────────────
+// ── 假网关的回答（**只有 id**）────────────────────────────────────────────
 
-/** 正常网关清单：两条带档位的模型 + 一条什么都没声明的（走 core 的缺省值） */
+/**
+ * 注册路径上用的清单：三条，**只给 id**。
+ *
+ * 宿主的义务到 ModelSpec 为止；条目里其余字段长什么样是 core 的事（形状只留一份，在
+ * core 的测试里）。这一层要验的是「拉到了、怎么写进 settings」，不是网关怎么渲染 ——
+ * 所以这三条映射出来是 name=id、窗口 200000 / 4096（core 的缺省）、没有 reasoningEfforts。
+ * 字段映射本身由下面第一组用例用显式 ModelSpec 钉。
+ */
 const SEEDED = {
-  data: [
-    {
-      id: "agentfacade-large",
-      display_name: "Facade Large",
-      reasoning: true,
-      effort_options: ["low", "medium", "high", "max"],
-      context_window: 1000000,
-      max_output_tokens: 128000,
-    },
-    {
-      id: "agentfacade-small",
-      display_name: "Facade Small",
-      reasoning: true,
-      effort_options: ["off", "midium", "high"], // "midium" 是上游真实拼写：原样写进去
-      context_window: 200000,
-      max_output_tokens: 8192,
-    },
-    { id: "agentfacade-bare", display_name: "Facade Bare" },
-  ],
+  data: [{ id: "agentfacade-large" }, { id: "agentfacade-small" }, { id: "agentfacade-bare" }],
 };
 
 /**
@@ -325,6 +315,25 @@ const EXPECTED_PROFILE: PiAiProviderProfile = {
   ],
 };
 
+/**
+ * 注册路径（apply）写进 settings 的那一份 —— **手写快照**。
+ *
+ * 与 EXPECTED_PROFILE 不同，这份是「假网关只给 id」那一路的产物：name 退回 id、窗口是
+ * core 的缺省 200000 / 4096、没有 reasoningEfforts（网关没报档位 → core 给空数组 →
+ * 交集为空 → 整个字段省略）。两份快照各自钉一段：上面那份钉映射，这份钉管线。
+ */
+const EXPECTED_APPLIED_PROFILE: PiAiProviderProfile = {
+  displayName: "AgentFacade (main route)",
+  api: "openai-completions",
+  baseURL: "http://gateway.example:6450/v1",
+  apiKeyEnv: "AGENTFACADE_API_KEY",
+  models: [
+    { id: "agentfacade-large", name: "agentfacade-large", contextWindow: 200000, maxTokens: 4096 },
+    { id: "agentfacade-small", name: "agentfacade-small", contextWindow: 200000, maxTokens: 4096 },
+    { id: "agentfacade-bare", name: "agentfacade-bare", contextWindow: 200000, maxTokens: 4096 },
+  ],
+};
+
 /** 假宿主 describe() 里已存在的配置：别的路由 + 一个别的键（replace 必须原样保留） */
 const EXISTING_SECTION = {
   providers: {
@@ -349,7 +358,7 @@ const EXPECTED_SECTION = {
       baseURL: "http://192.168.50.4:6450/v1",
       models: [{ id: "dsh-manager", contextWindow: 1000000, maxTokens: 128000 }],
     },
-    agentfacade: EXPECTED_PROFILE,
+    agentfacade: EXPECTED_APPLIED_PROFILE,
   },
   agentDefaultModel: { provider: "buddy", model: "dsh-manager" },
 };
@@ -380,16 +389,58 @@ function captureFetch(respond: () => Response | Promise<Response>): { fetchImpl:
 
 const GATEWAY = "http://gateway.example:6450";
 
+/**
+ * 「主机 + 路径」，去掉 query。
+ *
+ * 清单地址上挂什么方言（`?dialect=` 之类）是 core 的事：这一层钉整条 URL，core 换个方言
+ * 这一层就红 —— 那不是宿主的行为变了。所以只钉打到哪台机器的哪条路径。
+ */
+function listTarget(url: string): string {
+  const parsed = new URL(url);
+  return `${parsed.origin}${parsed.pathname}`;
+}
+
 /** 一次正常 apply 的配置：注入地址与 fetch，别的走默认 */
 function configWith(fetchImpl: typeof fetch, extra: Partial<DshPluginConfig> = {}): DshPluginConfig {
   return { gateway: GATEWAY, fetchImpl, env: {}, warn: () => {}, ...extra };
 }
 
+
+/**
+ * 一条 ModelSpec 的构造器：只写这条用例关心的字段，其余按「网关没报」的默认值。
+ * 默认值不是断言（每处断言仍逐字写出期望结果），只是 ModelSpec 有八格。
+ */
+function spec(fields: Partial<ModelSpec> & { id: string }): ModelSpec {
+  return {
+    displayName: fields.id,
+    reasoning: true,
+    efforts: [],
+    contextWindow: 200000,
+    maxOutputTokens: 4096,
+    toolCall: null,
+    modalities: null,
+    cost: null,
+    ...fields,
+  };
+}
+
+/**
+ * 映射用例的输入：三条 ModelSpec —— **宿主的输入**，不是网关的报文。
+ *
+ * 覆盖 dsh 的收敛规则真正要处理的形状：四档齐全、带拼错的 `midium`、以及一条完全没有
+ * 已知档位的（交集为空 → 整个字段省略）。价格与模态这一侧不表达（provider schema 没有
+ * 那两格），所以按「网关没报」写。
+ */
+const SPECS: ModelSpec[] = [
+  spec({ id: "agentfacade-large", displayName: "Facade Large", efforts: ["low", "medium", "high", "max"], contextWindow: 1000000, maxOutputTokens: 128000 }),
+  spec({ id: "agentfacade-small", displayName: "Facade Small", efforts: ["off", "midium", "high"], contextWindow: 200000, maxOutputTokens: 8192 }),
+  spec({ id: "agentfacade-bare", displayName: "Facade Bare" }),
+];
 // ── 复验入口：固定 catalog 走真实管线，打印将要写进 settings 的 profile JSON ──
 //   node --experimental-strip-types hosts/dsh/test/check.ts --dump
-// 不联网、不读网关：SEEDED 就是父会话在线时看到的同一份网关形状。
+// 不联网、不读网关：输入就是上面那份 SPECS（与映射用例同一份数据）。
 if (process.argv.includes("--dump")) {
-  const profile = toProviderProfile(modelsFromPayload(SEEDED.data), { baseUrl: GATEWAY, api: DEFAULT_API, apiKeyEnv: DEFAULT_API_KEY_ENV });
+  const profile = toProviderProfile(SPECS, { baseUrl: GATEWAY, api: DEFAULT_API, apiKeyEnv: DEFAULT_API_KEY_ENV });
   console.log(JSON.stringify(profile, null, 2));
   process.exit(0);
 }
@@ -398,12 +449,7 @@ if (process.argv.includes("--dump")) {
 console.log("provider profile（期望值手写）");
 
 {
-  const specs = [
-    { id: "agentfacade-large", displayName: "Facade Large", reasoning: true, efforts: ["low", "medium", "high", "max"], contextWindow: 1000000, maxOutputTokens: 128000 },
-    { id: "agentfacade-small", displayName: "Facade Small", reasoning: true, efforts: ["off", "midium", "high"], contextWindow: 200000, maxOutputTokens: 8192 },
-    { id: "agentfacade-bare", displayName: "Facade Bare", reasoning: true, efforts: [], contextWindow: 200000, maxOutputTokens: 4096 },
-  ];
-  const profile = toProviderProfile(specs, { baseUrl: GATEWAY, api: DEFAULT_API, apiKeyEnv: DEFAULT_API_KEY_ENV });
+  const profile = toProviderProfile(SPECS, { baseUrl: GATEWAY, api: DEFAULT_API, apiKeyEnv: DEFAULT_API_KEY_ENV });
   check("默认方言 openai-completions：baseURL 带 /v1（docs/hosts-dsh.md 的实测结论）", profile.baseURL === `${GATEWAY}/v1`, profile.baseURL);
   check("provider profile 与手写快照逐字一致", same(profile, EXPECTED_PROFILE), JSON.stringify(profile));
   // ── 契约断言：按 llm-pi-ai 的真实 schema 断言，而不是按我们自己发出去的形状 ──
@@ -416,13 +462,23 @@ console.log("provider profile（期望值手写）");
   check("dsh 不认识的拼写被过滤（midium 不出现在 dict 里）", !("midium" in small) && same(Object.keys(small), ["off", "high"]), JSON.stringify(Object.keys(small)));
   check("off 的值是 null（协议：什么也不发）", small.off === null);
   check("交叉为空：整个字段省略（不是 []，也不是 {}）", !("reasoningEfforts" in profile.models[2]) && profile.models[2].reasoningEfforts === undefined);
-  const dropped = toModelProfile({ id: "x", displayName: "X", reasoning: true, efforts: ["midium", "none"], contextWindow: 1, maxOutputTokens: 1 });
+  const dropped = toModelProfile(spec({ id: "x", displayName: "X", efforts: ["midium", "none"], contextWindow: 1, maxOutputTokens: 1 }));
   check("上游档位全部不在封闭词汇里：字段缺席而不是空 dict / 空数组", !("reasoningEfforts" in dropped));
   check("toReasoningEfforts：off → null、其余值就是档位名", same(toReasoningEfforts(["off", "high"]), { off: null, high: "high" }));
   check("toReasoningEfforts：未知拼写 → undefined（调用方据此省略字段）", toReasoningEfforts(["midium", "none"]) === undefined);
   check("toReasoningEfforts：重复档位只留第一次且顺序不变", same(Object.keys(toReasoningEfforts(["high", "high", "low"]) ?? {}), ["high", "low"]));
+  // 价格 / 模态 / 工具调用：dsh 这一版 profile 没有对应的格子。钉的是「不泄漏」——
+  // 哪天有人图省事把 spec 整个展开进 profile，这条会红，而不是悄悄写出一份 schema 不认的配置。
+  const extra = toModelProfile(
+    spec({ id: "x", displayName: "X", contextWindow: 1000, maxOutputTokens: 100, toolCall: false, modalities: { input: ["text"], output: ["text"] }, cost: { inputPerMillion: 3, outputPerMillion: 15 } }),
+  );
+  check(
+    "spec 里 dsh 表达不了的字段（toolCall / modalities / cost）不出现在 profile 条目里",
+    same(Object.keys(extra).sort(), ["contextWindow", "id", "maxTokens", "name"]),
+    JSON.stringify(Object.keys(extra)),
+  );
 
-  const anthropic = toProviderProfile(specs, { baseUrl: GATEWAY, api: "anthropic-messages", apiKeyEnv: DEFAULT_API_KEY_ENV });
+  const anthropic = toProviderProfile(SPECS, { baseUrl: GATEWAY, api: "anthropic-messages", apiKeyEnv: DEFAULT_API_KEY_ENV });
   check("可配置方言 anthropic-messages：baseURL 到路由根（不拼 /v1）", anthropic.baseURL === GATEWAY, anthropic.baseURL);
   check("anthropic-messages 的 profile 除 api/baseURL 外与手写快照一致", same(anthropic, { ...EXPECTED_PROFILE, api: "anthropic-messages", baseURL: GATEWAY }));
 
@@ -524,13 +580,17 @@ let stateOld: DshState;
   check("新形态：走 mutate，没碰 replace", hostNew.calls.mutate === 1 && hostNew.calls.replace === 0, JSON.stringify(hostNew.calls));
   check(
     "新形态：注入的 ops 逐字等于手写快照（路径 + 值）",
-    same(hostNew.writes[0]?.ops, [{ op: "set", path: ["providers", "agentfacade"], value: EXPECTED_PROFILE }]),
+    same(hostNew.writes[0]?.ops, [{ op: "set", path: ["providers", "agentfacade"], value: EXPECTED_APPLIED_PROFILE }]),
     JSON.stringify(hostNew.writes[0]?.ops),
   );
   check("新形态：带上 describe 读到的 revision=1", hostNew.writes[0]?.revision === 1);
-  check("新形态：写进去的值与手写快照一致", same(routesOf(hostNew)["agentfacade"], EXPECTED_PROFILE));
+  check("新形态：写进去的值与手写快照一致", same(routesOf(hostNew)["agentfacade"], EXPECTED_APPLIED_PROFILE));
   check("新形态：ns 是 describe 里找到的那条", stateNew.ns === "llm-pi-ai", String(stateNew.ns));
-  check("新形态：fetch 打的是 {gateway}/v1/models", fetchN.urls.length === 1 && fetchN.urls[0] === `${GATEWAY}/v1/models`, JSON.stringify(fetchN.urls));
+  check(
+    "新形态：fetch 打的是 {gateway}/v1/models（query 里的方言由 core 决定，这一层不钉）",
+    fetchN.urls.length === 1 && listTarget(fetchN.urls[0]) === `${GATEWAY}/v1/models`,
+    JSON.stringify(fetchN.urls),
+  );
   check("新形态：describe(state) 里能看见选了哪条分叉", describe(stateNew).some((line) => line === "Write path: mutate+revision"), describe(stateNew).join(" | "));
 
   const fetchO = captureFetch(() => jsonResponse(SEEDED));
@@ -547,7 +607,7 @@ let stateOld: DshState;
     same(hostOld.writes[0]?.section, EXPECTED_SECTION),
     JSON.stringify(hostOld.writes[0]?.section),
   );
-  check("旧形态：写入后 section 里 agentfacade 与手写快照一致", same(routesOf(hostOld)["agentfacade"], EXPECTED_PROFILE));
+  check("旧形态：写入后 section 里 agentfacade 与手写快照一致", same(routesOf(hostOld)["agentfacade"], EXPECTED_APPLIED_PROFILE));
   const setOpValue = (write: WriteRecord | undefined): unknown => (write?.ops?.[0] as { value?: unknown } | undefined)?.value;
   check("两条路径写出的 provider 值相同（差异只在怎么交，不在交什么）", same(setOpValue(hostNew.writes[0]), (hostOld.writes[0]?.section?.providers as Record<string, unknown> | undefined)?.agentfacade));
 
@@ -628,7 +688,9 @@ await failingScenario("网关不可达", () => { throw new TypeError("fetch fail
 await failingScenario("HTTP 500", () => new Response("boom", { status: 500 }), "answered HTTP 500");
 await failingScenario("非 JSON 响应", () => new Response("definitely not json", { status: 200, headers: { "content-type": "text/plain" } }), "did not answer a JSON object");
 await failingScenario("空 data", () => jsonResponse({ data: [] }), "listed no models");
-await failingScenario("所有条目都没有 id", () => jsonResponse({ data: [{ display_name: "no-id" }] }), "listed no models");
+// 报文用 openai 渲染：这条走的是完整链路（假网关 → core 解析 → ModelSpec），喂的必须是
+// 网关真实形状，不能用旧渲染的词汇，否则这行会在下次渲染变化时变成假的通过。
+await failingScenario("所有条目都没有 id", () => jsonResponse({ data: [{ name: "no-id" }] }), "listed no models");
 
 {
   // 超时：fetch 永不返回，靠 AbortSignal 收尾

@@ -70,19 +70,19 @@ home-manager / nix 之类的 wrapper 启动的，那个 wrapper 通常每次启�
 | `api` | 固定 `anthropic-messages` |
 | `apiKey` | 固定 `public`（网关跑 public 模式时不校验） |
 | `models[].compat` | `forceAdaptiveThinking` + `sendSessionAffinityHeaders` 都开（provider 级不写，扩展注册路径不读它） |
-| `models[].id` / `name` | `id` / `display_name`（缺了用 `id`） |
-| `models[].reasoning` | `reasoning`，缺了按 `true`（不知道不等于不支持） |
+| `models[].id` / `name` | `id` / `name`（网关没给名字时 core 退回 `id`） |
+| `models[].reasoning` | `capabilities.reasoning.supported`，缺了按 `true`（不知道不等于不支持） |
 | `models[].input` | 固定 `["text","image"]` |
-| `models[].contextWindow` | `context_window`，缺了 200000 |
-| `models[].maxTokens` | `max_output_tokens`，缺了 4096 |
-| `models[].thinkingLevelMap` | `effort_options` 按 `level_map()` 的规则（往下取，不往上取；只有 `off` 的模型每一格都是 `off`） |
-| `models[].cost` | 固定全 0（网关不报价），**每条都要有**，见下一节 |
+| `models[].contextWindow` | `limit.context`，缺了 200000（core 的缺省） |
+| `models[].maxTokens` | `limit.output`，缺了 4096（core 的缺省） |
+| `models[].thinkingLevelMap` | `capabilities.reasoning.effort` 按 `level_map()` 的规则（往下取，不往上取；只有 `off` 的模型每一格都是 `off`） |
+| `models[].cost` | 网关的 `cost` 三侧（输入 / 输出 / 读缓存，每百万 token、美元）→ pi 的四格；写缓存价恒 0，见下一节 |
 
 映射规则就是这一层自己的约定：`catalog.ts` 怎么写，`fixtures/expected.ts` 那份手写快照
 就怎么记。改映射要同时改快照 —— 两边一起动是刻意的，否则「映射改了但测试还绿」。
 
 **已知行为**：网关报的档位里出现 `default`（pi 没有这一档）时，它排在已知档位之后，
-于是 pi 的 `max` 会映到 `default`（录制里的 `model-02` 就是这样）。这不是插件的选择，
+于是 pi 的 `max` 会映到 `default`（`test/check.ts` 里 `SPECS` 的 `model-02` 就是这样）。这不是插件的选择，
 是上游报出来的形状 —— 改掉就与网关对不上了。
 
 ## `cost` 与 `compat` 为什么写在每条模型上
@@ -102,8 +102,11 @@ home-manager / nix 之类的 wrapper 启动的，那个 wrapper 通常每次启�
 | `compat.sendSessionAffinityHeaders` | 不发 `x-session-affinity`（`openrouter` 格式才用 `x-session-id`），网关拿不到客户端会话 id：`502 upstream HTTP 400 MissingSessionID` |
 | `compat.forceAdaptiveThinking` | pi 不发 `output_config.effort`，改发 `thinking.budget_tokens` —— 上面那张 `thinkingLevelMap` 整条被绕过 |
 
-所以 `toPiModel()` 给每条模型都写上这两格（`cost` 全 0 = 不计价，与 pi 给 `models.json`
-条目补的默认值相同）。快照用例把它们算在内：删掉任一条就红。
+所以 `toPiModelEntry()` 给每条模型都写上这两格。`cost` 的四个数字来自网关的三侧报价
+（每百万 token、美元）：`input` / `output` / `cacheRead`；**写缓存价恒为 0**，网关不报这一项。
+网关没报价（`cost: null`）时四格全 0 —— 0 在 pi 里表示不计价，与「没报价」在 pi 侧不可区分
+（那是 pi 的成本统计口径，不是我们的断言；pi 没有「未知价格」这个状态）。快照用例把它们算在
+内：删掉任一条就红。
 
 ## 命令
 
@@ -133,22 +136,19 @@ home-manager / nix 之类的 wrapper 启动的，那个 wrapper 通常每次启�
 ## 测
 
 ```bash
-pnpm test        # 80 条用例，起假网关跑真工厂
+pnpm test        # 85 条用例，起假网关跑真工厂
 pnpm typecheck   # 连 test/ 一起类型检查
 ```
 
-离线：假网关是 `test/fake-upstream.ts` 起的 127.0.0.1 随机端口，响应是
-`fixtures/gateway-v1-models.json`（2026-11-19 从真网关录的一次 `/v1/models`，**id 与
-显示名已换成合成的 `model-NN`/`Model NN`**：真实目录属于内部信息，这份录制只需要
-那 17 条的**形状** —— `off` 单独一档、四档齐全但夹着 `default`/`none`、`midium` 这种
-拼错的档位、只有 `off` 的模型，这些组合才是映射逻辑要覆盖的东西）。
-`fixtures/expected.ts` 是期望配置的**手写快照**（`EXPECTED`），用例拿它逐字比对 —— 录制里
-那两条 `cost`/`compat` 也在比对范围内，删掉任何一条就红。它不由任何程序生成。
+离线：假网关是 `test/fake-upstream.ts` 起的 127.0.0.1 随机端口；期望值分两处：
 
-重新录一份（需要网关可达）。期望值不重新生成 —— 照着新录制逐条手改 `fixtures/expected.ts`：
+- `test/check.ts` 里的 `SPECS`：**17 条显式 `ModelSpec`** —— 宿主的输入面。覆盖映射真正要处理的
+  形状：`off` 单独一档、四档齐全但夹着 `default`/`none`、`midium` 这种拼错的档位、只有 `off` 的
+  模型。**这里没有网关报文的拷贝**：条目长什么样是 core 的事，形状只留一份（在 core 的测试里），
+  网关换个渲染不会把这一层拖下水。
+- `fixtures/expected.ts`：期望配置的**手写快照**（`EXPECTED`），用例拿 `SPECS` 映射出来的整份
+  provider 配置与它逐字比对 —— 那两格 `cost`/`compat` 也在比对范围内，删掉任何一条就红。
+  它不由任何程序生成；改映射要同时手改它。
 
-```bash
-curl -s {gateway}/v1/models | python3 -m json.tool > fixtures/gateway-v1-models.json
-```
-
-录制里不要带真实地址、凭据或会话 —— 这份文件跟插件一起走。
+注册路径（真起假网关、走真 fetch）那几条只需要「有 N 条能过 core 的清单」，所以假网关只回
+`{ data: [{ id }] }` —— 条目的其余字段由 core 归一，不在这里重复声明。

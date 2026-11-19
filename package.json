@@ -1,0 +1,18 @@
+{
+  "name": "agentfacade-extensions",
+  "private": true,
+  "type": "module",
+  "description": "One core, several agents: turn the AgentFacade gateway model catalog into each agent host's provider config",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:core": "node --experimental-strip-types core/test/check.ts",
+    "test:pi": "node --experimental-strip-types hosts/pi/test/check.ts",
+    "test:opencode": "node --experimental-strip-types hosts/opencode/test/check.ts",
+    "test:dsh": "node --experimental-strip-types hosts/dsh/test/check.ts",
+    "test": "pnpm run test:core && pnpm run test:pi && pnpm run test:opencode && pnpm run test:dsh"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

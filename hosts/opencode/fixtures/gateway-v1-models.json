@@ -1,0 +1,48 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "coder-a",
+      "display_name": "Coder A",
+      "reasoning": true,
+      "effort_options": ["off", "low", "high", "max"],
+      "context_window": 1000000,
+      "max_output_tokens": 384000
+    },
+    {
+      "id": "dsh-manager",
+      "display_name": "Deepseek Harness Manager",
+      "reasoning": true,
+      "effort_options": ["off", "default", "low", "medium", "high", "xhigh", "max"],
+      "context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "flat",
+      "display_name": "Flat",
+      "reasoning": false,
+      "effort_options": ["off"],
+      "context_window": 200000,
+      "max_output_tokens": 4096
+    },
+    {
+      "id": "bare"
+    },
+    {
+      "id": "zeros",
+      "context_window": 0,
+      "max_output_tokens": 0
+    },
+    {
+      "id": "weird",
+      "display_name": "Weird",
+      "effort_options": ["high", "off", "midium", "high"],
+      "context_window": "131072",
+      "max_output_tokens": "32768"
+    },
+    {
+      "id": "",
+      "display_name": "no id"
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+# 首次启动后合并进 NAS 的 dsh-home/profiles/web/cordis.patch.yml
+# 注意：Cordis override 整段替换 config——lark-channel 条目必须完整重述
+# 插件 bundle patch 里的凭据层（appId/appSecret !!js），只改 requireMention。
+
+# ── 模型 provider（minimax-code 主 + SenseNova 备）────────────────────
+- id: llm-pi-ai
+  config:
+    providers:
+      minimax-code:
+        apiKeyEnv: MINIMAX_CODE_API_KEY
+        api: anthropic-messages
+        # NAS 上 buddy router 的 /minimax 分组（一个端口，按上游分组）
+        baseURL: http://192.168.50.4:6450/minimax
+        models:
+          - id: Minimax-M3.1-Flash
+            contextWindow: 1000000
+            maxTokens: 128000
+      sensenova:
+        apiKeyEnv: SENSENOVA_HERMES_API_KEY
+        api: openai-completions
+        baseURL: https://token.sensenova.cn/v1
+        compat:
+          supportsDeveloperRole: false
+          maxTokensField: max_tokens
+        models:
+          - id: sensenova-6.8-flash-lite
+            contextWindow: 131072
+
+# ── 飞书渠道（omdsh-dev/dsh-lark-channel 插件 bundle 插入的实例，全量覆盖）──
+# LARK_APP_ID/LARK_APP_SECRET 环境变量为空时，首启在日志打 QR 链接，
+# 飞书扫码自动创建应用，凭据经宿主 settings 服务持久化。
+- id: lark-channel
+  config:
+    requireMention: false
+    requireMentionByChat:
+      oc_84b2e7f61b169ea1126fe4d438805b63: true
+    cwd: /data
+    workspaceRoots:
+      - /data
+    provider: minimax-code
+    model: Minimax-M3.1-Flash
+    appId: !!js process.env.LARK_APP_ID
+    appSecret: ""
+    appSecretRef: LARK_APP_SECRET
+    chatWorkspaces:
+      oc_62f8d554aa150a26e9382c013ac68456: /data/Obsidian/agents
+    chatModels:
+      oc_2baebfbe7bb88e46ec040e06c9967fc8: minimax-code/Minimax-M3.1-Flash
+      oc_62f8d554aa150a26e9382c013ac68456: minimax-code/Minimax-M3.1-Flash
+      oc_5801fabe53218540180b31965715bda0: minimax-code/Minimax-M3.1-Flash
+      oc_fdafd7fdfc70ce94a6db979a93490adc: minimax-code/Minimax-M3.1-Flash
+      oc_f897591e7fd46e29c2528b6e1ba72f4d: minimax-code/Minimax-M3.1-Flash
+      oc_84b2e7f61b169ea1126fe4d438805b63: minimax-code/Minimax-M3.1-Flash
+    chatEpochs:
+      lark-oc_62f8d554aa150a26e9382c013ac68456--1a102d1cff: "1"
+      lark-oc_5801fabe53218540180b31965715bda0: "1"
+      lark-oc_fdafd7fdfc70ce94a6db979a93490adc: "1"
+- id: ui-settings-general
+  name: "@deepseek-ai/dsh-client-ui-settings-general"
+  config:
+    welcomeNoticeVersion: 2026-09-28.1
+- id: locale
+  name: "@deepseek-ai/dsh-client-locale"
+  config:
+    preference: zh
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: minimax-code
+    model: Minimax-M3.1-Flash
+- id: settings
+  name: '@deepseek-ai/dsh-settings'
+  disabled: false
+
+# ── 新会话默认模型（与 hermes 主模型一致）────────────────────────────
+- id: config-editor
+  name: '@deepseek-ai/dsh-config-editor'
+  disabled: false
+
+# ── 本机定时任务调度器（no_agent 语义，不烧 LLM）────────────────────
+# 容器内无 root/systemd，entrypoint 只读，无法用系统 init 拉起后台进程。
+# 这个本地插件在 DSH 启动后拉起 /data/cron/runner.py；
+# 调度器本身零依赖、独立运行，DSH 挂了它也停，重启 DSH 会自动再拉起。
+- insert:
+    - id: cron-runner
+      name: 'dsh-cron-runner'
+      config:
+        runnerPath: '/data/cron/runner.py'
+        pythonBin: 'python3'
+        cwd: '/data/cron'
+        startDelayMs: 15000
+        retryIntervalMs: 60000
+
+# scys（生财有术）MCP：本地 OAuth 代理提供 Streamable HTTP 端点，凭据由代理持有
+- insert:
+    - id: mcp-scys
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: scys
+        transport: streamable-http
+        url: http://127.0.0.1:8931/mcp
+        toolCallTimeoutMs: 120000

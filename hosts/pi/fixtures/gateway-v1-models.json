@@ -1,0 +1,281 @@
+{
+  "data": [
+    {
+      "id": "model-01",
+      "type": "model",
+      "display_name": "Model 01",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "effort_options": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "id": "model-02",
+      "type": "model",
+      "display_name": "Model 02",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "model-03",
+      "type": "model",
+      "display_name": "Model 03",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "id": "model-04",
+      "type": "model",
+      "display_name": "Model 04",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "effort_options": [
+        "off",
+        "none",
+        "high"
+      ]
+    },
+    {
+      "id": "model-05",
+      "type": "model",
+      "display_name": "Model 05",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "low",
+        "midium",
+        "high"
+      ]
+    },
+    {
+      "id": "model-06",
+      "type": "model",
+      "display_name": "Model 06",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "id": "model-07",
+      "type": "model",
+      "display_name": "Model 07",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "effort_options": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "id": "model-08",
+      "type": "model",
+      "display_name": "Model 08",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "model-09",
+      "type": "model",
+      "display_name": "Model 09",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": false,
+      "context_window": 131072,
+      "max_output_tokens": 32768,
+      "effort_options": [
+        "off",
+        "low",
+        "high"
+      ]
+    },
+    {
+      "id": "model-10",
+      "type": "model",
+      "display_name": "Model 10",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": false,
+      "context_window": 131072,
+      "max_output_tokens": 65536,
+      "effort_options": [
+        "off",
+        "low",
+        "high"
+      ]
+    },
+    {
+      "id": "model-11",
+      "type": "model",
+      "display_name": "Model 11",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "default",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "id": "model-12",
+      "type": "model",
+      "display_name": "Model 12",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "effort_options": [
+        "off",
+        "none",
+        "high"
+      ]
+    },
+    {
+      "id": "model-13",
+      "type": "model",
+      "display_name": "Model 13",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "id": "model-14",
+      "type": "model",
+      "display_name": "Model 14",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 262144,
+      "effort_options": [
+        "off"
+      ]
+    },
+    {
+      "id": "model-15",
+      "type": "model",
+      "display_name": "Model 15",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "low",
+        "midium",
+        "high"
+      ]
+    },
+    {
+      "id": "model-16",
+      "type": "model",
+      "display_name": "Model 16",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    {
+      "id": "model-17",
+      "type": "model",
+      "display_name": "Model 17",
+      "created_at": 1795061290,
+      "reasoning": true,
+      "tool_call": true,
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "effort_options": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ]
+    }
+  ],
+  "has_more": false,
+  "first_id": "model-01",
+  "last_id": "model-17"
+}

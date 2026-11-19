@@ -1,0 +1,428 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "buddy": {
+      "name": "Buddy (主路由)",
+      "package": "@ai-sdk/anthropic",
+      "settings": {
+        "baseURL": "http://192.168.50.4:6450/v1",
+        "apiKey": "public"
+      },
+      "models": {
+        "coder-a": {
+          "name": "Coder A",
+          "limit": {
+            "context": 1000000,
+            "output": 384000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        },
+        "coder-b": {
+          "name": "Coder B",
+          "limit": {
+            "context": 1000000,
+            "output": 32000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        },
+        "coder-c": {
+          "name": "Coder C",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        },
+        "coder-d": {
+          "name": "Coder D",
+          "limit": {
+            "context": 1000000,
+            "output": 262144
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off"
+              ]
+            }
+          }
+        },
+        "coder-e": {
+          "name": "Coder E",
+          "limit": {
+            "context": 200000,
+            "output": 4096
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": false,
+              "effort": [
+                "off"
+              ]
+            }
+          }
+        },
+        "coder-f": {
+          "name": "Coder F",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        },
+        "dsh-manager": {
+          "name": "Deepseek Harness Manager",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "default",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            }
+          }
+        },
+        "magic-context-dreamer": {
+          "name": "MagicContext Dreamer Model",
+          "limit": {
+            "context": 262144,
+            "output": 32768
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        },
+        "magic-context-historian": {
+          "name": "MagicContext Historian Model",
+          "limit": {
+            "context": 262144,
+            "output": 65536
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        },
+        "reviewer-a": {
+          "name": "Reviewer A",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "default",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            }
+          }
+        },
+        "reviewer-b": {
+          "name": "Reviewer B",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        },
+        "reviewer-c": {
+          "name": "Reviewer C",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        },
+        "reviewer-d": {
+          "name": "Reviewer D",
+          "limit": {
+            "context": 1000000,
+            "output": 262144
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off"
+              ]
+            }
+          }
+        },
+        "reviewer-e": {
+          "name": "Reviewer E",
+          "limit": {
+            "context": 200000,
+            "output": 4096
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "medium"
+              ]
+            }
+          }
+        },
+        "reviewer-f": {
+          "name": "Reviewer F",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        },
+        "tester": {
+          "name": "Tester",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "off",
+                "low",
+                "high",
+                "max"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

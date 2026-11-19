@@ -227,7 +227,7 @@ check(
 );
 
 check(
-  "导出的缺省值常量就是 200000 / 4096（宿主不该各写一份）",
+  "导出的缺省值常量就是 200000 / 4096（agent 不该各写一份）",
   DEFAULT_CONTEXT_WINDOW === 200000 && DEFAULT_MAX_OUTPUT_TOKENS === 4096,
   `${DEFAULT_CONTEXT_WINDOW}/${DEFAULT_MAX_OUTPUT_TOKENS}`,
 );
@@ -689,7 +689,7 @@ function freshState(): SyncState<HostModel> {
   return { gateway: "", from: "", lastGood: [], lastRefresh: null, lastError: null, registered: false };
 }
 
-/** 宿主只需要给两样：地址怎么解析、自己的模型形状怎么生成 */
+/** agent 只需要给两样：地址怎么解析、自己的模型形状怎么生成 */
 function deps(overrides: Partial<SyncDeps<HostModel>> = {}): SyncDeps<HostModel> {
   return {
     resolve: () => ({ ok: true, gateway: "http://gw.example:6450", from: "test" }),
@@ -705,7 +705,7 @@ function deps(overrides: Partial<SyncDeps<HostModel>> = {}): SyncDeps<HostModel>
   const { impl } = captureFetch(() => jsonResponse({ data: [{ id: "model-01" }, { id: "model-02" }] }));
   const outcome = await syncCatalog(state, deps({ fetchOptions: { timeoutMs: 200, fetchImpl: impl } }));
   check(
-    "首次成功：交回宿主形状的清单",
+    "首次成功：交回 agent 形状的清单",
     same(outcome, { ok: true, models: ["model-01", "model-02"] }),
     JSON.stringify(outcome),
   );
@@ -780,7 +780,7 @@ function deps(overrides: Partial<SyncDeps<HostModel>> = {}): SyncDeps<HostModel>
 }
 
 {
-  // 宿主的映射一条都没产出（字段全不认识）：同样不能替换
+  // agent 的映射一条都没产出（字段全不认识）：同样不能替换
   const state: SyncState<HostModel> = {
     gateway: "http://gw.example:6450",
     from: "test",
@@ -894,16 +894,16 @@ function deps(overrides: Partial<SyncDeps<HostModel>> = {}): SyncDeps<HostModel>
   const { impl } = captureFetch(() => jsonResponse({ data: [{ id: "model-01" }] }));
   const outcome = await syncCatalog(state, deps({ fetchOptions: { timeoutMs: 200, fetchImpl: impl } }));
   check("成功时清掉 lastError", outcome.ok && state.lastError === null, JSON.stringify({ outcome, lastError: state.lastError }));
-  check("core 自己不碰 registered 标志（注册是宿主的事）", state.registered === false, String(state.registered));
+  check("core 自己不碰 registered 标志（注册是 agent 的事）", state.registered === false, String(state.registered));
 }
 
-// ── 跨宿主契约 ───────────────────────────────────────────────────────────
+// ── 跨 agent 契约 ───────────────────────────────────────────────────────────
 
 console.log("");
 console.log("HostAdapter 契约");
 
 {
-  // 一个最小的适配器：只用来钉住契约的形状 —— 任何宿主实现长出额外的必需成员，
+  // 一个最小的适配器：只用来钉住契约的形状 —— 任何 agent 实现长出额外的必需成员，
   // 或者 toProvider 拿到的东西不是 (specs, opts)，这里就编译不过 / 断言不过
   const adapter: HostAdapter<{ name: string; models: string[] }, { registered: boolean }> = {
     id: "fake",
@@ -936,7 +936,7 @@ console.log("HostAdapter 契约");
   check("register 拿到 provider 与 RegisterContext", same(registered, { registered: true }), JSON.stringify(registered));
 }
 
-// ── 归属规则：core 里不许出现宿主词汇 ─────────────────────────────────────
+// ── 归属规则：core 里不许出现 agent 词汇 ─────────────────────────────────────
 
 console.log("");
 console.log("core 的归属规则（禁用词扫描）");
@@ -956,7 +956,7 @@ console.log("core 的归属规则（禁用词扫描）");
   ];
   // `capabilities` 开了一半口子：它是**网关报文**的键（capabilities.reasoning /
   // capabilities.tools），catalog.ts 必须读它；但它出现在别的 core 文件里、或以 `capabilities:` 的
-  // key 位置出现，就说明宿主的形状漏进了契约。下面那条 key 位置断言是这条口子的补偿。
+  // key 位置出现，就说明 agent 的形状漏进了契约。下面那条 key 位置断言是这条口子的补偿。
   const PAYLOAD_ONLY = "capabilities";
   const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts"];
   const hits: string[] = [];
@@ -969,7 +969,7 @@ console.log("core 的归属规则（禁用词扫描）");
     if (file !== "catalog.ts" && text.includes(PAYLOAD_ONLY)) hits.push(`${file}: ${PAYLOAD_ONLY}`);
     if (/(^|[\s,{])capabilities\s*:/m.test(text)) keyHits.push(file);
   }
-  check("core 的四个源文件里没有宿主词汇", hits.length === 0, JSON.stringify(hits));
+  check("core 的四个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
   check("capabilities 只在读报文的位置，没变成我们自己的字段名", keyHits.length === 0, JSON.stringify(keyHits));
   check(
     "扫描确实读到了四个源文件（不然上一行永远绿）",

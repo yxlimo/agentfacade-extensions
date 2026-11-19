@@ -1,25 +1,10 @@
 // dsh 的设置写入层：能力探测（一次）、找 llm-pi-ai 的 ns、把 provider profile 写进去。
-//
-// 为什么整层按能力探测而不是看版本号：上游以 rc.N 高频迭代（docs/hosts-dsh.md 实测
-// 0.2.1-rc.2 / 0.2.2-rc.1 / master 三版），版本号字符串随时变，接口形状却稳定。
-// 三条分叉各有一条降级路径，每条单独命中：
-//
-//   · 写 API：mutate（只写命名路径，不必重述脱敏密钥）→ 没有就 replace/update
-//     （整段提交，从脱敏后的快照重建会静默删掉密钥字段 —— 这是降级要付的代价）
-//   · 并发保护：写 API 接受 expectedRevision → 没有就「读一次写一次」，冲突不可检测
-//   · volatile 判定：宿主的 isVolatilePath 拒绝非 volatile 路径 → 没有就本插件自己按
-//     llm-pi-ai 的 Config 形状校验（providers 在三个版本里都是 volatile，但旧版没有
-//     那层检查，没人替我们拦坏配置）
-//
-// 探测结果由调用方缓存（index.ts 存在 state.capabilities 上），本层每次调用只读。
+// 整层按能力探测而不是看版本号（上游 rc.N 迭代快，接口形状反而稳），三条分叉各有降级路径与代价。
+// 分叉与代价见 docs/design.md 的 DeepSeek Harness 一节；探测结果由调用方缓存，本层每次调用只读。
 
 import { validateProviderProfile, type PiAiProviderProfile } from "./provider.ts";
 
-/**
- * describe() 的一条。字段形状照已安装 dsh 包的 `dsh-settings.d.ts`（在 /nix/store 下找到
- * dsh-0.2.2 的包目录后读其 lib/node_modules/@deepseek-ai/dsh；索引在 docs/reference/README.md）。这里不 import 那个包：它依赖 @deepseek-ai/cordis，
- * 本仓装不了。`revision` 可选 —— 老形态宿主可能不返回它（docs/hosts-dsh.md 的分叉表）。
- */
+/** 形状照已安装 dsh 包的 `dsh-settings.d.ts`（在已安装的 dsh 包里）；不 import 那个包，它依赖 cordis */
 export interface SettingsDescriptor {
   ns: string;
   autoGenerate?: boolean;
@@ -30,17 +15,12 @@ export interface SettingsDescriptor {
   secrets?: unknown[];
 }
 
-/** docs/hosts-dsh.md 规定唯一的写入形态：命名路径的 set/unset */
+/** docs/design.md 规定唯一的写入形态：命名路径的 set/unset */
 export type SettingsPathOp =
   | { op: "set"; path: readonly string[]; value: unknown }
   | { op: "unset"; path: readonly string[] };
 
-/**
- * dsh 的 settings 服务里本插件用到的那部分。
- *
- * `isVolatilePath` 是 mutate 的内部检查（vendor 的 d.ts 里没有签名，所以这里是
- * unknown 的宽松形状），存在与否本身就是能力信号。
- */
+/** dsh 的 settings 服务里本插件用到的那部分；`isVolatilePath` 存在与否本身就是能力信号 */
 export interface SettingsHost {
   writable?: boolean;
   documentPath?: string;
@@ -51,19 +31,15 @@ export interface SettingsHost {
   isVolatilePath?(path: unknown): boolean;
 }
 
-/** 降级到哪条写 API；null 表示这版宿主一条都没有 */
+/** 降级到哪条写 API；null 表示这版 agent 一条都没有 */
 export type WriteMode = "mutate" | "replace" | "update";
 
 export interface Capabilities {
   /** 实际会用的写 API（mutate 优先；都没有时是占位，problems 里写明） */
   write: WriteMode;
-  /**
-   * 写 API 是否接受 expectedRevision。判定用函数 `length`（真实实现是可选第三参，
-   * 不带默认值时 `length` 就是 3）。把 revision 写成默认值（`r = 0`）的实现会被判成
-   * 没有 —— 那种实现本来也拿不到「本次读到的是哪个版本」。
-   */
+  /** 判定用函数 `length`：带默认值（`r = 0`）的实现会被判成没有，那种实现本来也拿不到版本 */
   revision: boolean;
-  /** 宿主没有 isVolatilePath：本插件自己校验 provider 形状 */
+  /** agent 没有 isVolatilePath：本插件自己校验 provider 形状 */
   ownVolatileCheck: boolean;
   /** 写 API 是 replace/update：必须先合并旧 section（代价见文件头） */
   mergeSection: boolean;
@@ -72,10 +48,8 @@ export interface Capabilities {
 }
 
 /**
- * 探测宿主能力。只做形状判定（typeof / 函数参数个数），不碰版本号。
- *
- * 传 undefined（宿主没有 settings 服务）时不抛，返回带 problems 的能力表：插件随后
- * 报错说明，且**不**退化成写文件 —— 那是红线。
+ * 探测 agent 能力：只做形状判定（typeof / 函数参数个数），不碰版本号。
+ * agent 没有 settings 服务时不抛，返回带 problems 的能力表 —— 调用方随后报错说明，且**不**退化成写文件。
  */
 export function probeCapabilities(host: SettingsHost | undefined): Capabilities {
   if (!host || typeof host.describe !== "function") {
@@ -120,11 +94,8 @@ export type NamespacePick =
   | { ok: false; error: string };
 
 /**
- * 从 describe() 里找出 llm-pi-ai 那个条目的 ns。
- *
- * 不写死 id：它可能是 `llm-pi-ai`，也可能是 `@deepseek-ai/dsh-llm-pi-ai`。判定按
- * schema 里有没有 `providers` 这个键（docs/hosts-dsh.md 第 1 条）；宿主老形态不给
- * schema 时退一步看 value 里有没有 providers（「缺 schema 改用配置项白名单判定」）。
+ * 从 describe() 里找出 llm-pi-ai 那个条目的 ns，不写死 id：按 schema 有没有 `providers` 键判定，
+ * agent 老形态不给 schema 时退一步看 value 里有没有 providers。
  */
 export function pickNamespace(descriptors: readonly SettingsDescriptor[]): NamespacePick {
   const bySchema = descriptors.find((entry) => mentionsProviders(entry.schema));
@@ -154,8 +125,8 @@ export function describeEntry(host: SettingsHost, ns: string): SettingsDescripto
 export interface WriteOutcome {
   ok: boolean;
   /**
-   * 实际走的分叉，写进状态与日志（docs/hosts-dsh.md：每条分叉都要留下选了哪条的痕迹）。
-   * 形态：`mutate+revision` / `mutate` / `replace+revision` / `replace` / `update+revision` / `update`
+   * 实际走的分叉，写进状态与日志（每条分叉都要留下选了哪条的痕迹）：
+   * `mutate+revision` / `mutate` / `replace+revision` / `replace` / `update+revision` / `update`
    */
   path: string;
   ns: string;
@@ -172,9 +143,7 @@ export interface WriteOptions {
 }
 
 /**
- * 把 provider profile 写进 llm-pi-ai 条目的 `providers.<route>`。
- *
- * 顺序：volatile/形状校验 → 按能力选写 API → 冲突重读重试一次。
+ * 把 provider profile 写进 `providers.<route>`：校验 → 按能力选写 API → 冲突重读重试一次。
  * 任何一步失败都返回 ok:false 并带一句人话；**绝不**在这里动文件。
  */
 export async function writeProvider(options: WriteOptions): Promise<WriteOutcome> {
@@ -183,8 +152,7 @@ export async function writeProvider(options: WriteOptions): Promise<WriteOutcome
   const target = ["providers", providerName];
 
   if (caps.ownVolatileCheck) {
-    // 旧版没有 isVolatilePath：自己按 llm-pi-ai 的 Config 形状校验。校验不过就拒绝 ——
-    // 写进去就是一份启动时炸的配置，还会把 providers 下别的路由一起带崩
+    // 旧版没有 isVolatilePath：自己按 Config 形状校验，校验不过就拒绝 —— 写进去是一份启动时炸的配置
     const invalid = validateProviderProfile(value);
     if (invalid !== null) {
       return { ok: false, path: caps.write, ns: entry.ns, error: `${invalid} — refusing to write providers.${providerName}` };
@@ -223,13 +191,11 @@ export async function writeProvider(options: WriteOptions): Promise<WriteOutcome
       if (!isConflict(error)) {
         return { ok: false, path: write, ns: entry.ns, error: `settings write failed: ${messageOf(error)}` };
       }
-      // 没有 revision 参数就没有冲突可言（旧版读一次写一次）；真拿到 SETTINGS_CONFLICT
-      // 说明宿主仍然做版本检查，重读一次再写是唯一能做的
+      // 没有 revision 参数就没有冲突可言；真拿到 SETTINGS_CONFLICT 时，重读一次再写是唯一能做的
       if (attempt >= 1) {
         return { ok: false, path: `${write}+revision`, ns: entry.ns, error: `SETTINGS_CONFLICT persisted after one retry: ${messageOf(error)}` };
       }
-      // 重读一次：SETTINGS_CONFLICT 带着 actual，但值本身也可能变了，重读更稳。
-      // 只重试一次 —— 循环重试会把并行写变成忙等
+      // 重读一次：SETTINGS_CONFLICT 带着 actual，但值本身也可能变了。只重试一次，循环重试会把并行写变成忙等
       const fresh = describeEntry(host, entry.ns);
       if (fresh === null) {
         return { ok: false, path: `${write}+revision`, ns: entry.ns, error: `${messageOf(error)} — re-describing did not find ${JSON.stringify(entry.ns)}` };
@@ -240,11 +206,8 @@ export async function writeProvider(options: WriteOptions): Promise<WriteOutcome
 }
 
 /**
- * replace/update 用的完整 section：旧值原样保留，只换 providers.<route> 这一格。
- *
- * 为什么必须先合并：replace 的重建来自脱敏文档，凭据字段（apiKeyEnv 之类）本来就不在
- * 里面；直接提交 { providers: {...} } 会把 section 里别的键（比如 agent-default-model
- * 的 provider/model）一起清掉。
+ * replace/update 用的完整 section：旧值原样保留，只换 `providers.<route>` 这一格。
+ * 重建来自脱敏文档，凭据字段不在里面；直接提交就会把 section 里别的键（如 agent-default-model）清掉。
  */
 export function mergedSection(section: unknown, providerName: string, value: PiAiProviderProfile): Record<string, unknown> {
   const base = isPlainObject(section) ? { ...section } : {};
@@ -259,8 +222,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * 私有 API 没有 vendor 的类型：`isVolatilePath` 究竟是收数组还是点路径没人保证。
- * 两种形状都问一次，谁认用谁 —— 都不认才当作「不是 volatile」拒绝。
+ * `isVolatilePath` 没有 vendor 的类型，收数组还是点路径没人保证：两种形状都问一次，都不认才拒绝。
  * 它抛异常时也按 false 处理：拿不到一个诚实的回答，就不写。
  */
 function isVolatile(host: SettingsHost, path: readonly string[]): boolean {

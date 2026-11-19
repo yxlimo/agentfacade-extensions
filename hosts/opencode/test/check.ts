@@ -1,4 +1,4 @@
-// test/check.ts — opencode 宿主（**v2 插件 API**）的自检。
+// test/check.ts — opencode agent（**v2 插件 API**）的自检。
 //
 //   node --experimental-strip-types hosts/opencode/test/check.ts
 //
@@ -102,7 +102,7 @@ const hangFetch = (async (_input: unknown, init?: RequestInit) =>
   })) as unknown as typeof fetch;
 
 /**
- * v2 的宿主上下文。我们只用到 `provider.transform` 一格：它把 callback 交给我们，callback 里
+ * v2 的 agent 上下文。我们只用到 `provider.transform` 一格：它把 callback 交给我们，callback 里
  * 拿到一个只有 `add` 的 editor。真机是 opencode 自己构造这两个对象，这里记下被交进去的入参。
  */
 function fakeContext(): {
@@ -131,8 +131,8 @@ const GATEWAY = "http://gateway.example:6450";
 /**
  * 「主机 + 路径」，去掉 query。
  *
- * 清单地址上挂什么方言（`?dialect=` 之类）是 core 的事：宿主这一层钉整条 URL，core 换个
- * 方言这一层就红 —— 那不是宿主的行为变了。所以这里只钉打到哪台机器的哪条路径。
+ * 清单地址上挂什么方言（`?dialect=` 之类）是 core 的事：agent 这一层钉整条 URL，core 换个
+ * 方言这一层就红 —— 那不是 agent 的行为变了。所以这里只钉打到哪台机器的哪条路径。
  */
 function listTarget(url: string): string {
   const parsed = new URL(url);
@@ -162,7 +162,7 @@ async function runSetup(options: {
  *
  * 默认值不是断言（下面每处断言仍然逐字写出期望结果）；它存在的理由只是 ModelSpec 有
  * 八格，而一条用例通常只关心其中两三格。注意 `toolCall: null` 与 `modalities: null`
- * 是「网关没说」，**不是** false / 空数组 —— 这两格的差别是本宿主唯一要做选择的地方。
+ * 是「网关没说」，**不是** false / 空数组 —— 这两格的差别是本 agent 唯一要做选择的地方。
  */
 function spec(fields: Partial<ModelSpec> & { id: string }): ModelSpec {
   return {
@@ -185,7 +185,7 @@ const SPEC: ModelSpec = {
   efforts: ["off", "low", "high", "max"],
   contextWindow: 1000000,
   maxOutputTokens: 384000,
-  // 网关这一版报的三项：能调工具、模态是 text+image、价格本宿主不表达
+  // 网关这一版报的三项：能调工具、模态是 text+image、价格本 agent 不表达
   toolCall: true,
   modalities: { input: ["text", "image"], output: ["text"] },
   cost: null,
@@ -194,7 +194,7 @@ const SPEC: ModelSpec = {
 /**
  * 假网关的回答：一条模型，**只给 id**。
  *
- * 宿主的义务到 ModelSpec 为止；条目里其余字段长什么样是 core 的事（形状只留一份），
+ * agent 的义务到 ModelSpec 为止；条目里其余字段长什么样是 core 的事（形状只留一份），
  * 这样网关改渲染时这一层不会被拖下水。注册路径要验的是「拉到了、注册了一次」。
  */
 const ONE_LISTED = {
@@ -217,7 +217,7 @@ const ONE_PAYLOAD: OpencodeV2Payload = {
       modelID: "model-01",
       providerID: "agentfacade",
       // 只有 id 的条目：名字退回 id、窗口 200000/4096（core 的缺省值），
-      // tools 为 true（toolCall=null 时本宿主按支持）、模态是录制里的常量
+      // tools 为 true（toolCall=null 时本 agent 按支持）、模态是录制里的常量
       name: "model-01",
       capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
       variants: [],
@@ -292,7 +292,7 @@ check(
   brief(toV2Model(SPEC).capabilities),
 );
 
-// 工具：网关说「不能」照它；说「不知道」（null）时本宿主按支持 —— 这是宿主的选择
+// 工具：网关说「不能」照它；说「不知道」（null）时本 agent 按支持 —— 这是 agent 的选择
 check(
   "toolCall=false → capabilities.tools 为 false（网关明确说不能调工具）",
   toV2Model({ ...SPEC, toolCall: false }).capabilities.tools === false,
@@ -629,7 +629,7 @@ console.log("setup：超时预算（opencode 启动路径上被 await 的那个�
   const elapsed = Date.now() - started;
   check("网关不响时不注册", added.length === 0, String(added.length));
   check(
-    "超时预算是 1500ms（宿主把自己的预算传了下去，不是 core 的 5 秒）",
+    "超时预算是 1500ms（agent 把自己的预算传了下去，不是 core 的 5 秒）",
     warnings.some((w) => w.includes("timed out after 1500ms")),
     JSON.stringify(warnings),
   );
@@ -690,9 +690,9 @@ console.log("");
 console.log("整份清单 → 整份 payload（与手写快照逐字比对）");
 
 /**
- * 快照用例的输入：6 条 ModelSpec —— **宿主的输入**，不是网关的报文。
+ * 快照用例的输入：6 条 ModelSpec —— **agent 的输入**，不是网关的报文。
  *
- * 之所以不再放一份录制：宿主的职责是「ModelSpec → 宿主配置」。网关报文的形状只该有一份
+ * 之所以不再放一份录制：agent 的职责是「ModelSpec → agent 配置」。网关报文的形状只该有一份
  * （在 core 的测试里）；这一层再抄一份，网关换个渲染就得跟着改，而它一个字段都没变。
  * 这几条的 id / 名字 / 窗口与 fixtures/expected.ts 那份手写快照一一对应。
  */
@@ -795,7 +795,7 @@ fs.writeFileSync(path.join(home, ".config", "buddy-helper", "config.json"), '{"g
 {
   const facade = resolveGateway({ FACADE_GATEWAY: "http://facade.example:6450" }, home);
   check(
-    "没有宿主自己的变量时 FACADE_GATEWAY 赢过配置文件",
+    "没有 agent 自己的变量时 FACADE_GATEWAY 赢过配置文件",
     facade.ok && facade.gateway === "http://facade.example:6450" && facade.from === "FACADE_GATEWAY",
     JSON.stringify(facade),
   );
@@ -848,13 +848,13 @@ check("超时预算是 1500ms（启动路径上被 await 的那个数）", DEFAU
 }
 
 {
-  // 宿主自己的变量没设、共用变量设了：请求打到共用那个
+  // agent 自己的变量没设、共用变量设了：请求打到共用那个
   const { impl, calls } = captureFetch(() => jsonResponse(ONE_LISTED));
   await runSetup({
     env: { OPENCODE_FACADE_GATEWAY: "", FACADE_GATEWAY: "http://facade.example:6450" },
     fetchOptions: { fetchImpl: impl },
   });
-  check("空的宿主变量被跳过，落到 FACADE_GATEWAY", same(calls.map(listTarget), ["http://facade.example:6450/v1/models"]), JSON.stringify(calls));
+  check("空的 agent 变量被跳过，落到 FACADE_GATEWAY", same(calls.map(listTarget), ["http://facade.example:6450/v1/models"]), JSON.stringify(calls));
 }
 
 // ── 插件导出形状 + 归属规则 ───────────────────────────────────────────────
@@ -875,7 +875,7 @@ check("默认导出没有 v1 遗留的 server 一格", !("server" in plugin), br
   const files = SOURCES.map((name) => path.join(HOST_DIR, name));
   check("四个源文件都在", files.every((file) => fs.existsSync(file)), JSON.stringify(SOURCES));
 
-  // 网关协议与 core 的归一化词汇不属于宿主层：这一层只接收 ModelSpec[]
+  // 网关协议与 core 的归一化词汇不属于 agent 层：这一层只接收 ModelSpec[]
   const PROTOCOL = ["/v1/models", "context_window", "max_output_tokens", "display_name", "effort_options", "fetch("];
   const protocolHits: string[] = [];
   // 写文件的 API 一个都不许有：注册必须是运行时的，用户的配置只能由用户自己改
@@ -886,8 +886,8 @@ check("默认导出没有 v1 遗留的 server 一格", !("server" in plugin), br
     for (const word of PROTOCOL) if (text.includes(word)) protocolHits.push(`${path.basename(file)}: ${word}`);
     for (const word of WRITES) if (text.includes(word)) writeHits.push(`${path.basename(file)}: ${word}`);
   }
-  check("宿主源码里没有网关协议/core 归一化的词汇", protocolHits.length === 0, JSON.stringify(protocolHits));
-  check("宿主源码里没有任何写文件的 API", writeHits.length === 0, JSON.stringify(writeHits));
+  check("agent 源码里没有网关协议/core 归一化的词汇", protocolHits.length === 0, JSON.stringify(protocolHits));
+  check("agent 源码里没有任何写文件的 API", writeHits.length === 0, JSON.stringify(writeHits));
 }
 
 console.log("");

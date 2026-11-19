@@ -1,12 +1,12 @@
 {
   "name": "pi-agentfacade",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Let pi fetch the AgentFacade gateway's model catalog at startup and on refresh instead of writing ~/.pi/agent/models.json by hand",
+  "description": "Let pi load its model catalog from an AgentFacade gateway at startup instead of editing models.json by hand",
   "pi": {
     "extensions": ["./index.ts"]
   },
+  "files": ["*.ts", "core"],
   "scripts": {
     "test": "node --experimental-strip-types test/check.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"

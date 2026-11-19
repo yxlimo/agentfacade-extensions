@@ -1,48 +1,23 @@
-// dsh（DeepSeek Harness）这一侧的 provider profile：ModelSpec[] → llm-pi-ai 条目的 Config。
-//
-// 为什么档位在这里必须收敛，不能像 core 那样原样透传：
-// llm-pi-ai 的模型级 reasoningEfforts 不是字符串数组，而是 `false | dict` ——
-//   · 键 = 可选择的档位，必须是**封闭词汇** off|minimal|low|medium|high|xhigh|max
-//     （schemastery 拒未知键；实测把网关原样档位塞成数组时，Config 校验报
-//     `reasoningEfforts expected false | { [key: …]: string } but got [...]`，
-//     于是 settings.mutate 必然失败，宿主完全不可用）；
-//   · 值 = 该档位在协议里发送的拼写，off 允许 null（null = 什么也不发）；
-//   · 字段整体省略 = 沿用已安装目录里的能力声明。
-// 所以网关报的档位（`capabilities.reasoning.effort`）要与这七个词求交集：未知拼写
-// （真网关出现过 midium）丢掉；
-// 交集为空就整个字段省略。core 的 efforts 保持原样（那是网关的形状）—— 收敛成宿主
-// 自己的阶梯是宿主的事，dsh 的阶梯就是这张封闭表。
-//
-// 为什么这一层其它地方薄：字段归一化与缺省值（context 200000 / output 4096）在 core ——
-// 那是网关的约定，所有宿主共享同一份（core/catalog.ts）。
+// dsh 这一侧的 provider profile：ModelSpec[] → llm-pi-ai 条目的 Config。
+// 档位在这里必须收敛进封闭词汇（`reasoningEfforts` 不是字符串数组，塞错就整个 agent 不可用）；
+// 其余地方薄，因为归一化与缺省值在 core。细节见 docs/design.md 的 DeepSeek Harness 一节。
 
 import type { ModelSpec } from "../../core/types.ts";
 
-/**
- * llm-pi-ai 认得的上游协议。dsh 的 Config 由 `supportedProtocols` 校验（vendor 的
- * dsh-llm-pi-ai.d.ts 只 re-export 了名字，config.ts 没 vendor），所以这里按
- * docs/hosts-dsh.md 的实测结论各写一条，**形状校验**用它挡掉写错的方言。
- */
+/** llm-pi-ai 认得的上游协议：`supportedProtocols` 校验用它，也用它挡掉写错的方言 */
 export const SUPPORTED_APIS = ["openai-completions", "anthropic-messages"] as const;
 export type DshApi = (typeof SUPPORTED_APIS)[number];
 
 /**
- * 默认方言是 openai-completions，**不是**沿用 pi 宿主的 anthropic-messages。
- *
- * 实测依据（2026-11-19，对网关各发一次最小真实请求，见 docs/hosts-dsh.md）：
- * anthropic 路径的 thinking 块 `signature` 是空串（pi-ai 要走 allowEmptySignature
- * 兼容开关才容忍），多轮回放是已知雷点；openai 路径推理走 `reasoning_content`，
- * 没有签名回放问题。用户现有 provider-patch.example.yml 也走这条。
+ * 默认方言是 openai-completions，**不是** pi 那边的 anthropic-messages：anthropic 路径的 thinking
+ * 块 `signature` 是空串（多轮回放有风险），openai 路径推理走 `reasoning_content`。见 docs/design.md。
  */
 export const DEFAULT_API: DshApi = "openai-completions";
 
 /** provider 的展示名。用户可能已有自己的路由名，配置可覆盖 */
 export const DEFAULT_DISPLAY_NAME = "AgentFacade (main route)";
 
-/**
- * apiKeyEnv 指向的环境变量名。**密钥本身绝不写进配置**：dsh 自己从环境/凭据层解析这个
- * 名字。网关 public 模式不校验 key，名字仍然要有 —— 缺了 apiKeyEnv 配置就不成立。
- */
+/** 只写环境变量**名**，密钥本身绝不进配置；网关 public 模式不校验 key，但名字仍然要有 */
 export const DEFAULT_API_KEY_ENV = "AGENTFACADE_API_KEY";
 
 
@@ -54,13 +29,8 @@ export type DshEffort = (typeof DSH_EFFORTS)[number];
 export type ReasoningEffortsProfile = Partial<Record<DshEffort, string | null>>;
 
 /**
- * 网关报的档位（`capabilities.reasoning.effort`）→ llm-pi-ai 的 reasoningEfforts（dict 形态）。
- *
- * 契约规则（写错一条宿主就整个不可用，实测过）：
- *   · 只留 dsh 认识的七个档位；未知拼写丢掉（midium 这种上游真会发）；
- *   · 键顺序 = 网关给的顺序 —— 不排序、不补档；
- *   · off 的值是 null（「什么也不发」），其余值就是档位名本身；
- *   · 交集为空返回 undefined，调用方据此**整个字段省略**（不是 []、也不是 {}）。
+ * 网关档位 → `reasoningEfforts` 的 dict：只留认识的七个（未知拼写丢掉），键顺序照网关给的，off 的值是 null。
+ * 交集为空返回 undefined，调用方据此整个字段省略（不是 []、也不是 {}）。
  */
 export function toReasoningEfforts(efforts: readonly string[]): ReasoningEffortsProfile | undefined {
   const known = new Set<string>(DSH_EFFORTS);
@@ -81,15 +51,7 @@ export interface PiAiModelProfile {
   name: string;
   contextWindow: number;
   maxTokens: number;
-  /**
-   * `false | dict` 的 dict 一半；opt-in 时才出现。
-   *
-   * **不是字符串数组**：实测把网关原样档位塞成数组，llm-pi-ai 的 Config 校验直接报
-   * `reasoningEfforts expected false | { [key: off|minimal|…]: string } but got [...]`，
-   * 于是 settings.mutate 必然失败（这个宿主就完全用不了）。
-   * 字段省略 = 沿用已安装目录的能力；`false`（明确不支持推理）本插件不产出 ——
-   * 网关没声明档位时省略是更保守的答案（见 toReasoningEfforts）。
-   */
+  /** 省略 = 沿用已安装目录的能力；写成数组会被 schemastery 拒，agent 就整个不可用 */
   reasoningEfforts?: ReasoningEffortsProfile;
 }
 
@@ -111,12 +73,7 @@ export interface ProviderOptions {
   displayName?: string;
 }
 
-/**
- * dsh 的 baseURL 口径跟着方言变：
- *   · openai-completions → 带 `/v1`（适配器按 OpenAI 约定拼 /chat/completions）
- *   · anthropic-messages → 到路由根（适配器自己拼 /v1/messages，与 pi 宿主一致）
- * 网关地址（AdapterOptions.baseUrl）约定不带 /v1，core 也只清理了末尾斜杠。
- */
+/** 口径跟方言变：openai-completions 带 `/v1`，anthropic-messages 到路由根（适配器自己拼 /v1/messages） */
 export function endpointFor(baseUrl: string, api: string): string {
   const root = baseUrl.trim().replace(/\/+$/, "");
   return api === "openai-completions" ? `${root}/v1` : root;
@@ -148,13 +105,8 @@ export function toProviderProfile(specs: readonly ModelSpec[], options: Provider
 }
 
 /**
- * provider profile 的形状校验。
- *
- * 存在的理由：旧版占主机的 `ctx.settings` 没有 `isVolatilePath`（它本来是 mutate 的内部
- * 检查），宿主不会替我们拦一份坏配置 —— 写进去就是启动时 llm-pi-ai 报 Config 校验错，
- * 甚至把 providers 里别的路由一起带崩。所以旧形态这条路径上由本插件自己按
- * llm-pi-ai 的 Config 约定校验（providers 在三个版本里都是 volatile 的）。
- *
+ * 旧版 agent 的 `ctx.settings` 没有 `isVolatilePath`，没人替我们拦坏配置 —— 写进去就是启动时 llm-pi-ai
+ * 报校验错，还会把 providers 里别的路由一起带崩。所以这条路径上由本插件自己按 Config 约定校验。
  * 返回 null 表示形状成立；否则返回一句人话，写进警告。
  */
 export function validateProviderProfile(value: unknown): string | null {
@@ -195,11 +147,8 @@ export function validateProviderProfile(value: unknown): string | null {
 }
 
 /**
- * 校验模型级 reasoningEfforts 的形状（旧宿主没有 isVolatilePath 时的自保）。
- *
- * 合法只有三种 —— 省略（undefined，由调用方跳过）、`false`、以及键全在 DSH_EFFORTS 内、
- * off 值为 null、其余值为非空拼写串的 dict。`false` 本插件当前不产出（core 把未声明
- * 折成 true，省略对它是更保守的答案），但它是契约里合法的一半，校验要认。
+ * 合法只有三种：省略（调用方跳过）、`false`、以及键全在 DSH_EFFORTS 内且 off 值为 null 的 dict。
+ * `false` 本插件不产出，但它是契约里合法的一半，校验要认。
  */
 export function validateReasoningEfforts(value: unknown): string | null {
   if (value === false) return null;

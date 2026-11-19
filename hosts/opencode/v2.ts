@@ -1,39 +1,18 @@
-// opencode v2（本机 2.2.7）的 provider 注入形状。
-//
-// 事实来源：**实测**，不是文档抄写。做法是写一个最小插件跑
-// `opencode models --standalone`，把 `Model.Info.default()` / `Provider.Info.empty()`
-// 的运行时对象 dump 出来逐字比对。形状如下（v2.2.7）：
-//
-//   模型：{ id, modelID, providerID, name,
-//           capabilities: { tools: true, input: ["text","image"], output: ["text"] },
-//           variants: [], time: { released: 0 }, cost: [], status: "active",
-//           enabled: true, limit: { context: 200000, output: 32000 } }
-//   provider：{ id, name, activation: "auto" | "enabled", package: "" | <包名> }
-//
-// 与 v1 的差别（这就是这次重写的原因）：v1 的 `capabilities.reasoning.{supported,effort}`
-// 在 v2 **不存在**；v2 的可选变体挂在 `variants`（钩子里是 `model.variant`），但条目形状
-// 文档没给、实测默认是空数组 —— 所以这里**不发明**，档位信息在 opencode 上暂不表达，
-// 见 README 的「已知缺口」。
-//
-// 为什么不 import `@opencode/plugin`：那个包是 opencode 运行时注入的，本仓没有这个依赖；
-// 而且我们要的东西全是纯数据（brand 只在类型层），直接构造对象既少一个依赖也少一层
-// 版本耦合 —— 真机验证过 `editor.add()` 认这份对象。
+// opencode v2 的 provider 注入形状（本机 2.2.7 实测 dump 出来的，见 docs/design.md 的 OpenCode 一节）。
+// 与 v1 的差别是这次重写的理由：v2 没有 `capabilities.reasoning`，可选变体挂在 `variants`，而条目形状无文档 ——
+// 所以档位在 opencode 上不表达，这里不发明字段。也不 import `@opencode/plugin`：那个包由运行时提供。
 
 import type { AdapterOptions, ModelSpec } from "../../core/types.ts";
 import { PROVIDER_ID, PROVIDER_NAME, providerBaseUrl } from "./catalog.ts";
 
-/**
- * 网关没说能不能调工具（`toolCall === null`）时按**支持**：与 pi 那一侧的缺省一致 ——
- * 不知道不等于不能，缺省关掉工具会把模型降级成只会聊天。这是宿主的选择，core 不替我们猜。
- */
+/** 没声明按**支持**（与 pi 的缺省一致）：缺省关掉工具会把模型降级成只会聊天 */
 function toolsFor(spec: ModelSpec): boolean {
   return spec.toolCall === null ? true : spec.toolCall;
 }
 
 /**
- * 网关没报模态（`modalities === null`）时退回录制里的常量：`~/.config/opencode/shay-models.jsonc`
- * 的实录制，16 个模型全是这两项。**退回的是录制里的事实，不是推断** —— 网关报了就以网关为准，
- * 连「一个都不收」（`input: []`）也照它的来。
+ * 没报模态时退回录制里的常量（`~/.config/opencode/shay-models.jsonc` 的实录制，16 个模型全是这两项）。
+ * 退回的是录制里的事实，不是推断：网关报了就以网关为准，连 `input: []` 也照它的来。
  */
 const INPUT_MODALITIES = ["text", "image"] as const;
 const OUTPUT_MODALITIES = ["text"] as const;
@@ -67,9 +46,9 @@ export interface OpencodeV2Model {
 export interface OpencodeV2ProviderInfo {
   id: string;
   name: string;
-  /** `enabled` 表示「可用且默认参与」，对应 `Provider.Info.empty()` 的 `auto` 之外的显式开启 */
+  /** 显式开启：`Provider.Info.empty()` 的缺省是 `auto` */
   activation: "enabled";
-  /** 协议包：决定走哪套方言。v1 用 `@ai-sdk/anthropic`，v2 官方例子里是 `@opencode/ai/providers/*` */
+  /** 协议包：决定走哪套方言 */
   package: string;
   settings: { baseURL: string; apiKey: string };
 }
@@ -80,12 +59,7 @@ export interface OpencodeV2Payload {
   models: OpencodeV2Model[];
 }
 
-/**
- * 一条 ModelSpec → 一条 v2 模型定义。
- *
- * `name` 必须覆盖：`Model.Info.default()` 给的 name 是裸 id，不覆盖的话选择器里全是
- * `coder-a` 这种机器名。
- */
+/** `name` 必须覆盖：`Model.Info.default()` 给的 name 是裸 id，选择器里就全是机器名 */
 export function toV2Model(spec: ModelSpec, providerID: string = PROVIDER_ID): OpencodeV2Model {
   return {
     id: spec.id,
@@ -123,15 +97,8 @@ export function toV2Payload(
 }
 
 /**
- * 默认协议包。**实测结论，不是按名字推断的**：
- *
- *   · `@ai-sdk/anthropic`（v1 时代用户配置里的写法）在 v2 上直接失败：
- *     `Provider package @ai-sdk/anthropic does not export model(modelID, settings)` ——
- *     v2 要求 package 是一个导出 `model(modelID, settings)` 的模块，v1 的 AI SDK 包不是。
- *   · `@opencode/ai/providers/anthropic` 可用：真机 `opencode run --model agentfacade/coder-a`
- *     回了 `PONG`（baseURL 带 `/v1`，与网关主路由的 anthropic 方言一致）。
- *
- * 另一个候选 `@opencode/ai/providers/openai-compatible`（v2 官方例子用的那个）没有实测，
- * 留作可配置项；换包就是换方言，换之前先验一次真实请求。
+ * 实测结论，不是按名字推断的：`@ai-sdk/anthropic`（v1 写法）在 v2 上直接失败，因为 v2 要求 package 导出
+ * `model(modelID, settings)`；`@opencode/ai/providers/anthropic` 可用，真机 `opencode run` 回了 PONG。
+ * 另一个候选 `@opencode/ai/providers/openai-compatible` 没有实测。换包就是换方言，换之前先验一次真实请求。
  */
 export const DEFAULT_PACKAGE = "@opencode/ai/providers/anthropic";

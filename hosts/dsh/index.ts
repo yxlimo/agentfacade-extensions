@@ -1,17 +1,6 @@
-// dsh 插件：让 dsh 在启动时从 AgentFacade 网关拉模型清单，写进自己的 llm-pi-ai 配置。
-//
-// 为什么不写文件：dsh 的生效途径是 ctx.settings（宿主自己的持久化 API，落到 profile
-// patch，等价于用户在设置页保存了一次）。cordis.patch.yml / settings.yaml 是用户的家产，
-// 插件碰它 = 绕过宿主的校验与备份。所以本插件只调 ctx.settings；拿不到可用的写入 API
-// 就报错说明，**不**降级成写文件（docs/design.md 的红线）。
-//
-// 为什么映射在 provider.ts：dsh 侧的字段面（displayName / api / baseURL / apiKeyEnv /
-// models）与 pi 宿主完全不同；core 只给 ModelSpec[]，两边各映射各的。
-//
-// 亮点可见性（docs/hosts-dsh.md：每条分叉要留下选了哪条的痕迹）：
-//   · state.writePath 记着 `mutate+revision` / `mutate` / `replace+revision` / ...
-//   · 成功时打一行日志；describe(state) 还能把人看的几行交给调用方
-//   · 失败时 state.lastError + 警告：哪一步、什么原因、删掉了什么
+// dsh 插件：启动时从 AgentFacade 网关拉模型清单，写进自己的 llm-pi-ai 配置。
+// 只调 ctx.settings（agent 自己的持久化 API）；cordis.patch.yml / settings.yaml 是用户的家产，插件不碰，
+// 拿不到可用的写入 API 就报错说明，**不**降级成写文件。每条分叉都留下痕迹：state.writePath、日志、describe()。
 
 import type { FetchOptions } from "../../core/gateway.ts";
 import { syncCatalog, type SyncDeps, type SyncState } from "../../core/sync.ts";
@@ -22,23 +11,25 @@ import { pickNamespace, probeCapabilities, writeProvider, type Capabilities, typ
 /** 插件名（cordis 侧显示用） */
 export const name = "agentfacade-models";
 
+/**
+ * cordis 的服务依赖。不声明就直接读 `ctx.settings` 会抛
+ * `cannot get property "settings" without inject`（实测：插件始终不激活）。
+ * 只列 settings：写模型必须走它，缺了就该停下来而不是静默降级。
+ */
+export const inject = ["settings"];
+
 /** provider 路由名：独立名字，不与用户已有的路由（buddy / minimax-code …）撞名 */
 export const PROVIDER_NAME = "agentfacade";
 
 /** 日志前缀。dsh 的日志里一眼能捞出来 */
 const PREFIX = "[agentfacade-models/dsh]";
 
-/**
- * dsh 传给插件的 context 里本插件用到的部分。
- *
- * 形状照已安装 dsh 包的 `.d.ts`（见 docs/reference/README.md）缩到最小：本仓装不了
- * @deepseek-ai/cordis，所以只声明用到的两个成员。
- */
+/** dsh 传给插件的 context 里本插件用到的部分：只声明用到的成员，形状照已安装包的 `.d.ts` 缩到最小 */
 export interface DshPluginContext {
   settings?: SettingsHost;
-  /** 宿主的日志通道；没有就退到 console */
+  /** agent 的日志通道；没有就退到 console */
   logger?: { info?: (message: string) => void; warn?: (message: string) => void; error?: (message: string) => void };
-  /** 宿主启动时可以带取消信号；测试构造假的即可 */
+  /** agent 启动时可以带取消信号；测试构造假的即可 */
   signal?: AbortSignal;
 }
 
@@ -46,9 +37,9 @@ export interface DshPluginContext {
 export interface DshPluginConfig {
   /** provider 路由名，默认 agentfacade */
   providerName?: string;
-  /** 上游协议，默认 openai-completions（见 provider.ts 的实测结论） */
+  /** 上游协议，默认 openai-completions */
   api?: string;
-  /** 密钥环境变量名，默认 AGENTFACade_... 见 DEFAULT_API_KEY_ENV；**不写密钥本身** */
+  /** 密钥环境变量名，默认见 DEFAULT_API_KEY_ENV；**不写密钥本身** */
   apiKeyEnv?: string;
   /** provider 展示名 */
   displayName?: string;
@@ -74,13 +65,12 @@ export interface DshState {
   from: string;
   lastRefresh: number | null;
   lastError: string | null;
-  /**
-   * 实际走的分叉（`mutate+revision` / `mutate` / `replace+revision` / …）；
-   * 空串表示还没写过。docs/hosts-dsh.md 要求的「选了哪条路」的可见痕迹。
-   */
+  /** 实际走的分叉（`mutate+revision` / `replace` / …）；空串表示还没写过 */
   writePath: string;
   /** 能力探测只做一次，缓存这里 */
   capabilities: Capabilities | null;
+  /** 最近一次的同步报告。cordis 的 apply 不返回它（返回值被当 effect 收集），放这里 */
+  report: SyncReport | null;
 }
 
 /** apply 的结果。ok:false 时 error 是给人看的一句话 */
@@ -90,15 +80,11 @@ export type SyncReport =
 
 /** 新状态。测试可以自己造一份传给 apply 复用 */
 export function createState(): DshState {
-  return { ns: null, lastGood: null, gateway: "", from: "", lastRefresh: null, lastError: null, writePath: "", capabilities: null };
+  return { ns: null, lastGood: null, gateway: "", from: "", lastRefresh: null, lastError: null, writePath: "", capabilities: null, report: null };
 }
 
-/**
- * 插件入口。dsh 的 apply(ctx, config) 在启动路径上被 await：第一次请求前 provider 必须就位。
- *
- * 第三个参数只为测试/热重载注入状态（生产路径只调一次）。
- */
-export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState = createState()): Promise<SyncReport> {
+/** 同步一次的全流程。启动路径上被 await：第一次请求前 provider 必须就位；state 由调用方给 */
+export async function syncNow(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState): Promise<SyncReport> {
   const warn = pickWarn(ctx, config);
   const log = (message: string): void => {
     const line = `${PREFIX} ${message}`;
@@ -118,7 +104,7 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {},
     return fail(state, warn, `settings.describe() threw: ${messageOf(error)}`, PREFIX);
   }
 
-  // 能力探测只做一次：docs/hosts-dsh.md 要求探测结果一次性算好并缓存，不要每次调用都判定
+  // 能力探测只做一次：结果一次性算好缓存，不要每次调用都判定
   if (state.capabilities === null) state.capabilities = probeCapabilities(settings);
   const caps = state.capabilities;
   if (caps.problems.length > 0) {
@@ -139,7 +125,7 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {},
 
   const resolved = resolveDshGateway({ gateway: config.gateway, env: config.env });
   if (!resolved.ok) {
-    // 地址写错（不是 http(s)）时 core 已经带上下文；这里不覆盖 state.gateway/from
+    // 地址写错时 core 已经带上下文；这里不覆盖 state.gateway/from
     return fail(state, warn, resolved.error, PREFIX);
   }
 
@@ -160,7 +146,7 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {},
 
   const deps: SyncDeps<PiAiProviderProfile> = {
     resolve: () => resolved,
-    // 宿主形状的映射：网关地址由 deps.resolve 给出，映射只换字段（provider.ts）
+    // agent 形状的映射：网关地址由 deps.resolve 给出，映射只换字段（provider.ts）
     toHost: (specs) => [toProviderProfile(specs, { baseUrl: resolved.gateway, api, apiKeyEnv, displayName })],
     fetchOptions,
   };
@@ -175,7 +161,7 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {},
   state.lastGood = sync.lastGood.length === 0 ? null : sync.lastGood[0];
 
   if (!outcome.ok) {
-    // 失败与取消分开：取消是宿主自己的节流（新的刷新会 abort 旧的），不是网关出问题
+    // 失败与取消分开：取消是 agent 自己的节流（新的刷新会 abort 旧的），不是网关出问题
     if (!outcome.cancelled) {
       warn(`${PREFIX} ${outcome.error} — keeping the last known ${state.lastGood?.models.length ?? 0} model(s); nothing written`);
     }
@@ -207,9 +193,15 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {},
 }
 
 /**
- * 给用户看的那几行（行为与 pi 宿主的 describe(state) 对齐，文案是 dsh 的说法）。
- * docs/hosts-dsh.md：排障时能一眼看出「走的是哪条分叉」。
+ * cordis 的插件入口。cordis 把 apply 的返回值当 effect 收集：函数会被当作卸载钩子，
+ * 其余非空值一律 `TypeError: Invalid effect`（第一次真启动时就是挂在这里）。
+ * 所以入口不返回报告——报告放进 state.report，describe(state) 也能读。
  */
+export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState = createState()): Promise<void> {
+  state.report = await syncNow(ctx, config, state);
+}
+
+/** 给用户看的那几行，文案是 dsh 的说法；排障时能一眼看出走的是哪条分叉 */
 export function describe(state: DshState): string[] {
   const when = state.lastRefresh === null ? "never" : new Date(state.lastRefresh).toISOString();
   const lines = [
@@ -232,8 +224,7 @@ function pickWarn(ctx: DshPluginContext, config: DshPluginConfig): (message: str
 }
 
 /**
- * 失败出口。`silent` 用于「配置问题已经逐条 warn 过」的情况，避免同一条重复两遍。
- * 注意 state.lastError 永远被写上：排障第一眼看的就是它。
+ * 失败出口。`silent` 用于「配置问题已经逐条 warn 过」的情况，避免同一条重复两遍；state.lastError 永远写上。
  */
 function fail(state: DshState, warn: (message: string) => void, message: string, prefix: string, options: { silent?: boolean } = {}): SyncReport {
   state.lastError = message;

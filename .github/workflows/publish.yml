@@ -1,0 +1,48 @@
+name: Publish
+
+# 发布由 tag 驱动：`git tag v0.1.0 && git push --tags` 就是全部动作。
+# 发出去的是各包 package.json 里的版本，脚本会跳过 npm 上已存在的版本，
+# 所以重跑一次 tag 也能把上次没发完的包补上。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing 与 provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+        with:
+          version: 12
+
+      # Trusted publishing 需要较新的 npm，node 24 带的比 CI 用的 node 22 新。
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm run typecheck
+
+      - name: Tests
+        run: pnpm test
+
+      # 两个认证途径：NPM_TOKEN secret 存在就用它；不存在就走 npm 的
+      # trusted publishing（这台 job 的 OIDC 换一个短期凭据，什么都不用存）。
+      - name: Publish all packages
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bash scripts/publish-all.sh --provenance --access public

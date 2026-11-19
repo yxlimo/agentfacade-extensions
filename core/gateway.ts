@@ -14,7 +14,7 @@ export interface GatewayCandidate {
   readonly value: string;
 }
 
-/** 候选都没配时问它。core 只拿到「读」，不拿到路径 —— 配置文件属于宿主/工具链 */
+/** 候选都没配时问它。core 只拿到「读」，不拿到路径 —— 配置文件属于 agent/工具链 */
 export interface GatewayConfigSource {
   /** 报错与来源里怎么称呼它 */
   readonly label: string;

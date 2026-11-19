@@ -1,6 +1,6 @@
 // ModelSpec[] → pi 的 provider 配置：档位折进 pi 的阶梯，每条模型带上只有 pi 认的 cost / compat。
 // 输入是 core 归一过的 ModelSpec，不是网关报文；映射改这里就要同步改手写期望值（两边一起动是刻意的）。
-// 有几处看着像 bug，但**不许顺手改**，理由见 docs/design.md「宿主：pi」。
+// 有几处看着像 bug，但**不许顺手改**，理由见 docs/design.md 的 pi 一节。
 
 import type { ModelSpec } from "../../core/types.ts";
 /** 从浅到深；顺序即强弱，字母序会把 high 排到 low 前面 */
@@ -16,7 +16,7 @@ const COMPAT = { forceAdaptiveThinking: true, sendSessionAffinityHeaders: true }
 
 /**
  * 网关价 → pi 四格。没报价退回全 0（pi 没有「未知价格」这个状态），写缓存价恒为 0，四格必须齐。
- * 为什么这么折见 docs/design.md「宿主：pi」。
+ * 为什么这么折见 docs/design.md 的 pi 一节。
  */
 function costFor(cost: ModelSpec["cost"]): PiModelEntry["cost"] {
   if (cost === null) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -36,7 +36,7 @@ export interface PiModelEntry {
   contextWindow: number;
   maxTokens: number;
   thinkingLevelMap: Record<PiLevel, string | null>;
-  /** 每条模型都得自带 cost 与 compat：扩展注册路径不下发 provider 级那份 —— docs/design.md「宿主：pi」 */
+  /** 每条模型都得自带 cost 与 compat：扩展注册路径不下发 provider 级那份 —— docs/design.md 的 pi 一节 */
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
   compat: { forceAdaptiveThinking: boolean; sendSessionAffinityHeaders: boolean };
 }

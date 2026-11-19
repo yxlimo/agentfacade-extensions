@@ -1,9 +1,9 @@
-// 网关 /v1/models 的 payload → ModelSpec[]。纯函数：不碰网络、不读环境变量、不看宿主。
-// 这里做归一化而不是映射到某个宿主：字段名与缺省值都是网关的约定。
+// 网关 /v1/models 的 payload → ModelSpec[]。纯函数：不碰网络、不读环境变量、不看 agent。
+// 这里做归一化而不是映射到某个 agent：字段名与缺省值都是网关的约定。
 
 import type { ModelSpec } from "./types.ts";
 
-/** 网关没报上限时的兜底：这是网关的约定，所有宿主拿到同一条模型该给出同样的窗口 */
+/** 网关没报上限时的兜底：这是网关的约定，所有 agent 拿到同一条模型该给出同样的窗口 */
 export const DEFAULT_CONTEXT_WINDOW = 200000;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 
@@ -65,7 +65,7 @@ export function normalizeCost(value: unknown): ModelSpec["cost"] {
   if (cacheRead !== undefined) cost.cacheReadPerMillion = cacheRead;
   const outputPrice = priceOrNull(asRecord(text.output).price);
   if (outputPrice !== undefined) cost.outputPerMillion = outputPrice;
-  // 一个键都没有 = 网关没报价。空对象会被宿主当成「有报价，只是都没说」
+  // 一个键都没有 = 网关没报价。空对象会被 agent 当成「有报价，只是都没说」
   return Object.keys(cost).length > 0 ? cost : null;
 }
 
@@ -87,7 +87,7 @@ export function toModelSpec(raw: unknown): ModelSpec {
     efforts: normalizeEfforts(reasoning.effort) ?? [],
     contextWindow: positiveIntOr(limit.context, DEFAULT_CONTEXT_WINDOW),
     maxOutputTokens: positiveIntOr(limit.output, DEFAULT_MAX_OUTPUT_TOKENS),
-    // 没声明就是「不知道」：替网关判 true 或 false 都是下结论，交给宿主决定
+    // 没声明就是「不知道」：替网关判 true 或 false 都是下结论，交给 agent 决定
     toolCall: booleanOrNull(asRecord(capabilities.tools).supported),
     modalities: normalizeModalities(fields.modalities),
     cost: normalizeCost(fields.cost),

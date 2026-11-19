@@ -1,4 +1,4 @@
-// opencode v2 的 provider 注入形状（本机 2.2.7 实测 dump 出来的，见 docs/design.md「宿主：OpenCode」）。
+// opencode v2 的 provider 注入形状（本机 2.2.7 实测 dump 出来的，见 docs/design.md 的 OpenCode 一节）。
 // 与 v1 的差别是这次重写的理由：v2 没有 `capabilities.reasoning`，可选变体挂在 `variants`，而条目形状无文档 ——
 // 所以档位在 opencode 上不表达，这里不发明字段。也不 import `@opencode/plugin`：那个包由运行时提供。
 

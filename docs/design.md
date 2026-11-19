@@ -1,26 +1,34 @@
 # 设计决定与实测事实
 
-这份文档记录**为什么这样做**，以及**在真实宿主上量到的事实**。行为与用法见 [README](../README.md)。
+AgentFacade 的配套插件：一份 core，加各 agent 的适配器（目前接了 pi、OpenCode、DeepSeek Harness），把网关配置的模型同步进各 agent 的 provider。本文记录**为什么这样做**，以及**在真实 agent 上量到的事实**；行为与用法见 [README](../README.md)。
+
+## 各 agent 共同的约定
+
+这几条不分 agent。改任何一条，所有适配器都要跟着改，否则「同一个插件」就名不副实。
+
+- **不写 agent 的配置文件。** 注册只走 agent 自己的运行时 API。`models.json`、`opencode.jsonc`、`cordis.patch.yml` 都是用户的家产，写它们等于绕过 agent 的校验与备份。唯一的例外是我们自己那份 `~/.config/agentfacade/config.json`，见「网关地址从哪来」。
+- **拉不到就不注册，而不是注册成空。** 不可达、超时、空清单、非 JSON——一律保持原状，用户原有的模型继续可用，只留一行警告。注册空表的后果见「状态机」。
+- **provider 名独立。** 各 agent 都用 `agentfacade`，与用户已有的 provider（`buddy` 之类）各走各的，不覆盖，也不需要改名共存。
 
 ## 分层与归属线
 
 ```text
-网关 /v1/models ──> core ──> ModelSpec[] ──> hosts/<宿主> ──> 宿主的运行时注册 API
+网关 /v1/models ──> core ──> ModelSpec[] ──> hosts/<agent> ──> agent 的运行时注册 API
 ```
 
-- `core/` **不认识任何宿主**：没有宿主的字段名、档位阶梯、环境变量名、命令文案。它做的是网关的约定——字段怎么取、缺省值是多少、`null` 与 `0` 怎么分、拉不到时怎么办。
-- `hosts/<宿主>/` **不认识网关报文**：它只接收 `ModelSpec[]`。报文长什么样是 core 的事。
+- `core/` **不认识任何 agent**：没有 agent 的字段名、档位阶梯、环境变量名、命令文案。它做的是网关的约定——字段怎么取、缺省值是多少、`null` 与 `0` 怎么分、拉不到时怎么办。
+- `hosts/<agent>/` **不认识网关报文**：它只接收 `ModelSpec[]`。报文长什么样是 core 的事。
 
 两条线都由扫描强制，不靠自觉：
 
-- `core/test/check.ts` 扫 `core/` 的源文件，出现宿主词汇即失败。
-- `scripts/check-boundary.ts` 扫三个宿主的**生产源码**，出现网关协议词汇（`display_name`、`context_window`、`capabilities.*`、`limit.*`、`dialect=` …）或写文件 API 即失败。只扫代码不扫注释——注释里解释网关字段名是宿主作者需要的。
+- `core/test/check.ts` 扫 `core/` 的源文件，出现 agent 词汇即失败。
+- `scripts/check-boundary.ts` 扫各适配器的**生产源码**，出现网关协议词汇（`display_name`、`context_window`、`capabilities.*`、`limit.*`、`dialect=` …）或写文件 API 即失败。只扫代码不扫注释——注释里解释网关字段名是适配器作者需要的。
 
-为什么值得用扫描守：网关报文形状一度在宿主测试里被复制了三份，网关换渲染时三个宿主都得改一遍。生产代码始终只有一处认识网关，问题出在测试面在复制形状；现在报文形状只有一份，在 `core/test/fixtures/gateway-openai.json`。
+为什么值得用扫描守：网关报文形状一度在各适配器的测试里各存一份，网关换渲染时每个适配器都得改；现在报文形状只有一份，在 `core/test/fixtures/gateway-openai.json`。
 
 ## ModelSpec 契约
 
-单一跨宿主契约，`core/types.ts`：
+单一跨 agent 契约，`core/types.ts`：
 
 ```ts
 interface ModelSpec {
@@ -50,11 +58,11 @@ interface ModelSpec {
 
 具体后果：
 
-- `reasoning` 缺省为 `true`（不知道不等于不支持）；`toolCall` 缺省为 `null`（不替宿主猜）。
+- `reasoning` 缺省为 `true`（不知道不等于不支持）；`toolCall` 缺省为 `null`（不替 agent 猜）。
 - `efforts` 原样保留：不排序、不改名、不去重、不补 `off`。网关真会发 `midium` 这种拼写。
 - `modalities` 只有两侧都是字符串数组才取；一侧缺失是 `null`，不是 `[]`——`input: []` 是「一个模态都不收」，替网关填等于我们宣布一个不存在的限制。
 - `cost` 三个键各自独立：只报输出价时输入那侧不出现。补 0 会把「没说」变成「免费」。
-- 缺省值 `contextWindow: 200000`、`maxOutputTokens: 4096` 在 core，因为那是**网关**的约定，所有宿主应给出同样的窗口。
+- 缺省值 `contextWindow: 200000`、`maxOutputTokens: 4096` 在 core，因为那是**网关**的约定，各 agent 应给出同样的窗口。
 
 ## 报文方言：锁定 openai
 
@@ -73,16 +81,30 @@ interface ModelSpec {
 | `modalities` | `{ input: [...], output: [...] }` |
 | `cost.text.input.price` / `.cache.read` / `.text.output.price` | 每百万 token 的美元价 |
 
+## 网关地址从哪来
+
+每个 agent 的解析顺序，前面优先：
+
+```text
+<agent 自己的环境变量> → FACADE_GATEWAY → ~/.config/agentfacade/config.json
+  → ~/.config/buddy-helper/config.json（旧名，保留兼容）→ 默认 http://127.0.0.1:6450
+```
+
+- 环境变量名留在各适配器里——那种名字本身就是 agent 的事实。`config.json` 由 core 读写、各 agent 共用一份：「连到哪台网关」是全机一个事实，没理由让每个 agent 各配一遍。
+- 前几级写成非 http(s) 时**直接报错，不悄悄换成下一级**：用默认地址顶上去会让人以为配置生效了，然后在「明明配了却不生效」里绕很久。
+- 这份文件是我们自己的，可以写；agent 的配置文件永远不写。
+- `/agentfacade connect` 的归一化规则：没有 scheme 补 `http://`；scheme 是 `http` 且没写端口时补 `:6450`（`https` 不补，443 是它自己的默认）；末尾斜杠去掉；非 http(s) 一律拒绝且不写文件。写完立刻刷新一次——拉不到只报告原因、不回滚文件，换网络是正常操作。
+
 ## 状态机：拉不到怎么办
 
-所有宿主必须给出同一个答案，所以这段在 `core/sync.ts`：
+所有 agent 必须给出同一个答案，所以这段在 `core/sync.ts`：
 
 - 拉不到、空清单、非 JSON、`data` 不是数组 —— 都**不替换**已注册的清单。
 - 空清单算**失败**而不是成功：拿 0 条去注册等于把用户手上的模型清空（整表替换语义）。
-- 调用方取消（宿主重刷时 abort 上一次）**不算错误**，不写 `lastError`：把它记成错误会让每次正常启动都多一条吓人的警告。
+- 调用方取消（agent 重刷时 abort 上一次）**不算错误**，不写 `lastError`：把它记成错误会让每次正常启动都多一条吓人的警告。
 - 地址写错时不覆盖上一次的网关地址，否则排障时连「原来指哪」都看不出来。
 
-## 宿主：pi
+## pi
 
 - 用扩展注册路径（`registerProvider`），不是写 `models.json`。
 - **`cost` 与 `compat` 必须写在每条模型上**。pi 对两条注册路径的归一化程度不同（1.5.2，`provider-composer.js`）：`models.json` 一路由 `modelFromJson()` 补 `cost` 默认值、`applyModelsJson()` 用 `mergeCompat` 把 provider 级 `compat` 并进每条模型；扩展注册一路的 `extensionModelFromDefinition()` 只是展开定义，provider 级的一个都不下发。缺了会怎样（实测）：
@@ -93,7 +115,7 @@ interface ModelSpec {
 - 已知行为：网关档位里出现 `default`（pi 没有这一档）时它排在已知档位之后，于是 pi 的 `max` 会映到 `default`。这是上游报出来的形状，不是插件的选择。
 - 写缓存价恒为 0：网关只报输入 / 输出 / 读缓存三侧。网关没报价时四格全 0——0 在 pi 里表示不计价，pi 没有「未知价格」这个状态。
 
-## 宿主：OpenCode
+## OpenCode
 
 - 必须用 **v2 插件 API**：default 导出 `{ id, setup(ctx) }`，provider 通过 `ctx.provider.transform((editor) => editor.add({ info, models }))` 注册。v1 的函数返回 hooks 形状在 2.2.7 上直接加载失败：`Plugin must export a default definition with an id and an effect or setup function`。
 - 实测的运行时形状（2.2.7，用最小插件把对象 dump 出来比对）：
@@ -111,19 +133,19 @@ interface ModelSpec {
 - 配置键是复数 `plugins`，条目必须是目录。
 - `toolCall === null` 时按支持处理（与 pi 缺省一致）；`modalities === null` 时退回录制常量。
 
-## 宿主：DeepSeek Harness
+## DeepSeek Harness
 
-- 生效落点是 `ctx.settings`（宿主自己的持久化 API，落到 profile patch，等价于在设置页保存一次）。不碰 `cordis.patch.yml` / `settings.yaml`——那是用户的配置，绕过宿主的校验与备份。
+- 生效落点是 `ctx.settings`（dsh 自己的持久化 API，落到 profile patch，等价于在设置页保存一次）。不碰 `cordis.patch.yml` / `settings.yaml`——那是用户的配置，绕过 dsh 的校验与备份。
 - 写 API 按**能力探测**分叉，不看版本号（上游以 rc.N 高频迭代，接口形状反而稳定）：
 
   | 能力 | 有 | 没有时的降级与代价 |
   | --- | --- | --- |
   | `mutate` | 只写命名路径 | 退到 `replace`/`update`：整段提交，从脱敏快照重建会静默删掉凭据字段 |
   | `expectedRevision` | 冲突可检测 | 读一次写一次，冲突不可检测 |
-  | `isVolatilePath` | 宿主拦坏配置 | 插件自己按 `llm-pi-ai` 的 Config 形状校验（providers 在各版本都是 volatile） |
+  | `isVolatilePath` | agent 拦坏配置 | 插件自己按 `llm-pi-ai` 的 Config 形状校验（providers 在各版本都是 volatile） |
 
   走了哪条分叉要留下痕迹（状态与日志里记 `mutate+revision` / `replace` 之类）。
-- `llm-pi-ai` 的模型级 `reasoningEfforts` **不是字符串数组**，是 `false | dict`：键必须落在封闭词汇 `off|minimal|low|medium|high|xhigh|max`，值是协议里的拼写，`off` 可以是 `null`（什么也不发）。塞成数组会被 schemastery 拒：`reasoningEfforts expected false | {…} but got [...]`，于是写入必然失败、宿主完全不可用。交集为空时整个字段省略（不是 `[]`，也不是 `{}`）。
+- `llm-pi-ai` 的模型级 `reasoningEfforts` **不是字符串数组**，是 `false | dict`：键必须落在封闭词汇 `off|minimal|low|medium|high|xhigh|max`，值是协议里的拼写，`off` 可以是 `null`（什么也不发）。塞成数组会被 schemastery 拒：`reasoningEfforts expected false | {…} but got [...]`，于是写入必然失败、agent 完全不可用。交集为空时整个字段省略（不是 `[]`，也不是 `{}`）。
 - 默认方言是 `openai-completions`，不是 pi 那边的 `anthropic-messages`。实测对网关各发一次最小请求：anthropic 路径的 thinking 块 `signature` 是空串（需要 `allowEmptySignature` 兼容开关才容忍），多轮回放有风险；openai 路径的推理走 `reasoning_content`，无签名回放问题。
 - `baseURL` 口径跟着方言变：`openai-completions` 带 `/v1`，`anthropic-messages` 到路由根。
 - `apiKeyEnv` 只写环境变量**名**，密钥本身绝不进配置。
@@ -131,13 +153,12 @@ interface ModelSpec {
 ## 测试契约
 
 - `core`：纯函数 + 一次 fetch，用例注入 fetch，不起网络。
-- 每个 `hosts/*`：假宿主 API，断言注入的配置对象逐字（手写快照），并断言失败路径不注册。
-- 网关报文形状只有一份，在 `core/test/fixtures/gateway-openai.json`；宿主测试直接构造 `ModelSpec[]`。
-- `scripts/check-boundary.ts` 管层与层之间的边界，属于全仓，不属于任何单个宿主。
+- 每个 `hosts/*`：假 agent API，断言注入的配置对象逐字（手写快照），并断言失败路径不注册。
+- 网关报文形状只有一份，在 `core/test/fixtures/gateway-openai.json`；适配器测试直接构造 `ModelSpec[]`。
+- `scripts/check-boundary.ts` 管层与层之间的边界，属于全仓，不属于任何单个适配器。
 - 每条分叉（能力探测、方言、cost 语义）都要有能变红的用例：改一处实现，跑测试必须红。
 
 ## 非目标
 
-- 不写用户配置文件，不替用户安装或改宿主设置。
 - 不做局域网扫描找网关：只试解析出的那一个地址。猜错等于对着错的网关取清单。
-- 不在 `core` 里做任何宿主特化。需要新的事实，先进 `ModelSpec`，再由各宿主决定怎么表达。
+- 不在 `core` 里做任何 agent 特化。需要新的事实，先进 `ModelSpec`，再由各适配器决定怎么表达。

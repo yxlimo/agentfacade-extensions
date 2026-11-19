@@ -8,7 +8,7 @@ import path from "node:path";
 import { resolveGateway as pickGateway, type ResolvedGateway } from "../../core/gateway.ts";
 
 /**
- * 这一侧的环境变量优先级，从高到低。`FACADE_GATEWAY` 是几个宿主共用的名字：同一台机器上网关只有一个。
+ * 这一侧的环境变量优先级，从高到低。`FACADE_GATEWAY` 是几个 agent 共用的名字：同一台机器上网关只有一个。
  */
 export const GATEWAY_ENV_VARS = ["OPENCODE_FACADE_GATEWAY", "FACADE_GATEWAY"] as const;
 
@@ -30,7 +30,7 @@ export const NO_GATEWAY_HINT =
  */
 export const DEFAULT_TIMEOUT_MS = 1500;
 
-/** 配置文件的目录与文件名。和 pi 共用同一份：它是这套工具链的配置，不是某个宿主的 */
+/** 配置文件的目录与文件名。和 pi 共用同一份：它是这套工具链的配置，不是某个 agent 的 */
 const CONFIG_DIR = [".config", "buddy-helper"];
 const CONFIG_FILE = "config.json";
 

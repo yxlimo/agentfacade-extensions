@@ -1,16 +1,16 @@
 // 同步状态机：解析地址 → 拉清单 → 决定「换不换」。
-// 「拉不到 / 空清单都绝不替换已有清单」这条必须在所有宿主上一致，漏掉的后果是把用户手上的模型整表清零。
+// 「拉不到 / 空清单都绝不替换已有清单」这条必须在所有 agent 上一致，漏掉的后果是把用户手上的模型整表清零。
 // 通知怎么显示不在这里：core 只说这次算不算失败、是不是调用方自己取消的。
 
 import { fetchCatalog } from "./gateway.ts";
 import type { FetchOptions, ResolvedGateway } from "./gateway.ts";
 import type { ModelSpec } from "./types.ts";
 
-/** 状态：字段名是 core 的说法，宿主可以持有它也可以映射到自己字段；`lastGood` 的形状由宿主定 */
+/** 状态：字段名是 core 的说法，agent 可以持有它也可以映射到自己字段；`lastGood` 的形状由 agent 定 */
 export interface SyncState<Model> {
   /** 解析失败时保持上一次的值，不动 */
   gateway: string;
-  /** 地址是从哪一级来的；名字由宿主起，core 原样存着 */
+  /** 地址是从哪一级来的；名字由 agent 起，core 原样存着 */
   from: string;
   /** 最后一次成功的清单；**只在拿到非空清单时替换** */
   lastGood: Model[];
@@ -18,15 +18,15 @@ export interface SyncState<Model> {
   lastRefresh: number | null;
   /** 成功后清掉，取消时不动 */
   lastError: string | null;
-  /** 注册是宿主的事，core 不改它 */
+  /** 注册是 agent 的事，core 不改它 */
   registered: boolean;
 }
 
-/** 一次同步的外部依赖，全部由宿主注入：core 不认环境变量、不读配置文件 */
+/** 一次同步的外部依赖，全部由 agent 注入：core 不认环境变量、不读配置文件 */
 export interface SyncDeps<Model> {
   /** 地址解析。失败（地址写错）也要有结果，不要抛 */
   resolve(): ResolvedGateway;
-  /** ModelSpec → 宿主自己的模型形状 */
+  /** ModelSpec → agent 自己的模型形状 */
   toHost(specs: readonly ModelSpec[]): Model[];
   fetchOptions?: FetchOptions;
   now?: () => number;
@@ -51,7 +51,7 @@ export async function syncCatalog<Model>(
     state.lastError = resolved.error;
     return { ok: false, cancelled: false, error: resolved.error, models: state.lastGood };
   }
-  // 先写回地址再拉：拉失败时宿主也要能显示「试的是哪个地址、从哪来的」
+  // 先写回地址再拉：拉失败时 agent 也要能显示「试的是哪个地址、从哪来的」
   state.gateway = resolved.gateway;
   state.from = resolved.from;
 

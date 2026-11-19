@@ -56,10 +56,10 @@ function spec(fields: Partial<ModelSpec> & { id: string }): ModelSpec {
 }
 
 /**
- * 快照用例的输入：17 条 ModelSpec —— **宿主的输入**，不是网关的报文。
+ * 快照用例的输入：17 条 ModelSpec —— **agent 的输入**，不是网关的报文。
  *
- * 为什么不放一份录制：宿主的职责是「ModelSpec → 宿主配置」。网关报文的形状只该有一份
- * （在 core 的测试里）；宿主测试再抄一份，网关换个渲染这一层就得跟着改，而它一个字段
+ * 为什么不放一份录制：agent 的职责是「ModelSpec → agent 配置」。网关报文的形状只该有一份
+ * （在 core 的测试里）；agent 测试再抄一份，网关换个渲染这一层就得跟着改，而它一个字段
  * 都没变。这里要覆盖的是**映射真正处理的形状**：`off` 单独一档、四档齐全、四档齐全但
  * 夹着 `default` 与 `xhigh`、`none`、拼错的 `midium`、以及窗口/输出上限各不相同的那些。
  *
@@ -92,7 +92,7 @@ const SPECS: ModelSpec[] = [
 /**
  * 假网关的响应体：**只有 id**。
  *
- * 宿主的义务到 ModelSpec 为止；条目里其余字段长什么样是 core 的事（形状只留一份），
+ * agent 的义务到 ModelSpec 为止；条目里其余字段长什么样是 core 的事（形状只留一份），
  * 这样网关改渲染时这一层不会被拖下水。这些用例需要的只是「有 N 条能过 core 的清单」。
  */
 const LISTED = { data: SPECS.map(({ id }) => ({ id })) };
@@ -100,8 +100,8 @@ const LISTED = { data: SPECS.map(({ id }) => ({ id })) };
 /**
  * 请求打到的是不是模型清单那一路。
  *
- * 只看路径：清单地址上挂什么方言（`?dialect=` 之类）是 core 的事，宿主这一层不该知道。
- * 写死整条 URL 会让 core 换个方言这一层就红 —— 那不是宿主的行为变了。
+ * 只看路径：清单地址上挂什么方言（`?dialect=` 之类）是 core 的事，agent 这一层不该知道。
+ * 写死整条 URL 会让 core 换个方言这一层就红 —— 那不是 agent 的行为变了。
  */
 function isModelsPath(url: string): boolean {
   return url.split("?")[0] === "/v1/models";
@@ -270,7 +270,7 @@ check("有档位就照网关给的，不看 reasoning", same(effectiveEfforts(["
 }
 
 {
-  // 档位阶梯是宿主的事：这里只钉「spec.efforts 真的接到了 levelMap 上」（逐字）
+  // 档位阶梯是 agent 的事：这里只钉「spec.efforts 真的接到了 levelMap 上」（逐字）
   const mapped = toPiModelEntry(spec({ id: "m", efforts: ["off", "high"] }));
   check(
     "spec.efforts 接到 thinkingLevelMap（收敛规则在这一层）",

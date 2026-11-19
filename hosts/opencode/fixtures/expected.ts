@@ -5,7 +5,7 @@
 // 生成式的期望值做不到这一点 —— 实现改成什么样，期望值就跟着变成什么样，永远绿。
 //
 // 文件名叫 expected 而不是 fixtures.json：这里**没有**网关报文的拷贝。网关报文的形状只留一份
-// （在 core 的测试里），宿主这一层只认 ModelSpec。
+// （在 core 的测试里），agent 这一层只认 ModelSpec。
 
 import type { OpencodeV2Payload } from "../v2.ts";
 
@@ -46,7 +46,7 @@ export const EXPECTED: OpencodeV2Payload = {
       limit: { context: 1000000, output: 384000 },
     },
     {
-      // 上游报的档位原样带着 default / xhigh：本宿主不表达档位，所以这里看不出差别 —— 这正是缺口
+      // 上游报的档位原样带着 default / xhigh：本 agent 不表达档位，所以这里看不出差别 —— 这正是缺口
       id: "dsh-manager",
       modelID: "dsh-manager",
       providerID: "agentfacade",

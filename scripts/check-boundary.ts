@@ -1,6 +1,6 @@
-// 边界检查：宿主层不许知道网关报文长什么样。
-// 这条线靠自觉守不住（网关换渲染时宿主测试里各存一份报文，三个宿主都得跟着改），所以用扫描把它变成会红的检查。
-// 只扫宿主的**生产源码**：宿主测试里的报文是输入数据，不是宿主对协议的认知。
+// 边界检查：agent 层不许知道网关报文长什么样。
+// 这条线靠自觉守不住（网关换渲染时 agent 测试里各存一份报文，各 agent 都得跟着改），所以用扫描把它变成会红的检查。
+// 只扫 agent 的**生产源码**：agent 测试里的报文是输入数据，不是 agent 对协议的认知。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HOSTS_DIR = path.join(ROOT, "hosts");
 
-/** 网关协议与 core 归一化的词汇。宿主只该看见 ModelSpec 的字段名 */
+/** 网关协议与 core 归一化的词汇。agent 只该看见 ModelSpec 的字段名 */
 const PROTOCOL_WORDS = [
 	"/v1/models",
 	"display_name",
@@ -121,7 +121,7 @@ for (const host of hosts) {
 			if (code.includes(word)) failures.push(`${where}: 出现网关协议词汇 "${word}" —— 报文形状只能住在 core`);
 		}
 		for (const word of WRITE_WORDS) {
-			if (code.includes(word)) failures.push(`${where}: 出现写文件 API "${word}" —— 配置只能由宿主自己的运行时接口写`);
+			if (code.includes(word)) failures.push(`${where}: 出现写文件 API "${word}" —— 配置只能由 agent 自己的运行时接口写`);
 		}
 	}
 	// 正控：确认真的扫到了内容，否则「零命中」可能只是没匹配上任何文件
@@ -133,7 +133,7 @@ for (const host of hosts) {
 if (failures.length > 0) {
 	console.log("");
 	for (const line of failures) console.log(`  FAIL ${line}`);
-	console.log(`\n${failures.length} 条越界，${hosts.length} 个宿主`);
+	console.log(`\n${failures.length} 条越界，${hosts.length} 个 agent`);
 	process.exit(1);
 }
-console.log(`\n全部通过（${hosts.length} 个宿主）`);
+console.log(`\n全部通过（${hosts.length} 个 agent）`);

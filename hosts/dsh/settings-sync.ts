@@ -1,6 +1,6 @@
 // dsh 的设置写入层：能力探测（一次）、找 llm-pi-ai 的 ns、把 provider profile 写进去。
 // 整层按能力探测而不是看版本号（上游 rc.N 迭代快，接口形状反而稳），三条分叉各有降级路径与代价。
-// 分叉与代价见 docs/design.md「宿主：DeepSeek Harness」；探测结果由调用方缓存，本层每次调用只读。
+// 分叉与代价见 docs/design.md 的 DeepSeek Harness 一节；探测结果由调用方缓存，本层每次调用只读。
 
 import { validateProviderProfile, type PiAiProviderProfile } from "./provider.ts";
 
@@ -31,7 +31,7 @@ export interface SettingsHost {
   isVolatilePath?(path: unknown): boolean;
 }
 
-/** 降级到哪条写 API；null 表示这版宿主一条都没有 */
+/** 降级到哪条写 API；null 表示这版 agent 一条都没有 */
 export type WriteMode = "mutate" | "replace" | "update";
 
 export interface Capabilities {
@@ -39,7 +39,7 @@ export interface Capabilities {
   write: WriteMode;
   /** 判定用函数 `length`：带默认值（`r = 0`）的实现会被判成没有，那种实现本来也拿不到版本 */
   revision: boolean;
-  /** 宿主没有 isVolatilePath：本插件自己校验 provider 形状 */
+  /** agent 没有 isVolatilePath：本插件自己校验 provider 形状 */
   ownVolatileCheck: boolean;
   /** 写 API 是 replace/update：必须先合并旧 section（代价见文件头） */
   mergeSection: boolean;
@@ -48,8 +48,8 @@ export interface Capabilities {
 }
 
 /**
- * 探测宿主能力：只做形状判定（typeof / 函数参数个数），不碰版本号。
- * 宿主没有 settings 服务时不抛，返回带 problems 的能力表 —— 调用方随后报错说明，且**不**退化成写文件。
+ * 探测 agent 能力：只做形状判定（typeof / 函数参数个数），不碰版本号。
+ * agent 没有 settings 服务时不抛，返回带 problems 的能力表 —— 调用方随后报错说明，且**不**退化成写文件。
  */
 export function probeCapabilities(host: SettingsHost | undefined): Capabilities {
   if (!host || typeof host.describe !== "function") {
@@ -95,7 +95,7 @@ export type NamespacePick =
 
 /**
  * 从 describe() 里找出 llm-pi-ai 那个条目的 ns，不写死 id：按 schema 有没有 `providers` 键判定，
- * 宿主老形态不给 schema 时退一步看 value 里有没有 providers。
+ * agent 老形态不给 schema 时退一步看 value 里有没有 providers。
  */
 export function pickNamespace(descriptors: readonly SettingsDescriptor[]): NamespacePick {
   const bySchema = descriptors.find((entry) => mentionsProviders(entry.schema));

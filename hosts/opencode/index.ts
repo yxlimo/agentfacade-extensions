@@ -13,7 +13,7 @@ const PREFIX = "[facade-models]";
 /** 会出现在 opencode 的插件列表里 */
 export const PLUGIN_ID = "agentfacade.models";
 
-/** 状态就是 core 的 SyncState；`registered` 本宿主没有维护者（没有显示它的界面） */
+/** 状态就是 core 的 SyncState；`registered` 本 agent 没有维护者（没有显示它的界面） */
 export type OpencodeState = SyncState<OpencodeV2Payload>;
 
 export function freshState(): OpencodeState {
@@ -78,7 +78,7 @@ export async function refresh(
 }
 
 /**
- * v2 宿主上下文只声明用到的那一格：那个包由 opencode 运行时提供，本仓没有这个依赖。
+ * v2 agent 上下文只声明用到的那一格：那个包由 opencode 运行时提供，本仓没有这个依赖。
  * 形状来自官方文档的 `ctx.provider.transform((editor) => editor.add({ info, models }))` 用法。
  */
 export interface OpencodeV2Editor {

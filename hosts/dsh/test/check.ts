@@ -1,4 +1,4 @@
-// test/check.ts — dsh 宿主适配器的自检（纯离线：假宿主 + 注入 fetch）。
+// test/check.ts — dsh agent 适配器的自检（纯离线：假 agent + 注入 fetch）。
 //
 //   node --experimental-strip-types hosts/dsh/test/check.ts
 //
@@ -6,8 +6,8 @@
 //   · 映射：ModelSpec[] → llm-pi-ai 的 provider profile。输入是手写的 SPECS（下面那份），
 //     期望值**手写**在本文件里（EXPECTED_PROFILE / EXPECTED_SECTION），不由任何程序生成。
 //     「网关报文长什么样」不在这里 —— 那是 core 的事，形状只留一份。
-//   · 双宿主：一份「最新形态」假宿主（mutate + revision + isVolatilePath）与一份
-//     「旧形态」假宿主（没有 mutate、没有 revision、没有 isVolatilePath）。同一份模型清单、
+//   · 双 agent：一份「最新形态」假 agent（mutate + revision + isVolatilePath）与一份
+//     「旧形态」假 agent（没有 mutate、没有 revision、没有 isVolatilePath）。同一份模型清单、
 //     同一份已有配置，两条路径必须走不同分支（mutate vs replace），互相能证明差异。
 //   · 失败路径：网关不可达 / HTTP 500 / 非 JSON / 空 data / 全部缺 id → 一律不写。
 //     「上一次成功的清单不会被空清单覆盖」单独立一条。
@@ -61,7 +61,7 @@ function routesOf(host: FakeHost, ns = "llm-pi-ai"): Record<string, unknown> {
   return typeof value?.providers === "object" && value.providers !== null ? value.providers : {};
 }
 
-// ── 假宿主 ───────────────────────────────────────────────────────────────
+// ── 假 agent ───────────────────────────────────────────────────────────────
 // 行为照 vendor 的 dsh-settings.d.ts：describe 返回 ns/schema/value/revision；
 // mutate 只接受路径操作、按 expectedRevision 做乐观并发；replace 整段提交。
 
@@ -104,7 +104,7 @@ function conflictError(expected: number, actual: number): Error {
   return error;
 }
 
-/** 深拷贝一份 section，按 path 写一格（模拟宿主的 set 语义） */
+/** 深拷贝一份 section，按 path 写一格（模拟 agent 的 set 语义） */
 function setPath(target: Record<string, unknown>, path: readonly string[], value: unknown): void {
   let node = target;
   for (let i = 0; i < path.length - 1; i++) {
@@ -143,7 +143,7 @@ function makeHost(initial: readonly SettingsDescriptor[], shapes: HostShapes): F
     if (beforeEvery) bumpAll();
   };
 
-  // 乐观并发：宿主只在「真给了 expectedRevision」时校验；对不上就抛 SETTINGS_CONFLICT
+  // 乐观并发：agent 只在「真给了 expectedRevision」时校验；对不上就抛 SETTINGS_CONFLICT
   const checkRevision = (ns: string, expected: number | undefined): void => {
     if (shapes.givesRevision === false || expected === undefined) return;
     const actual = revisions.get(ns) ?? 0;
@@ -267,7 +267,7 @@ function makeHost(initial: readonly SettingsDescriptor[], shapes: HostShapes): F
 /**
  * 注册路径上用的清单：三条，**只给 id**。
  *
- * 宿主的义务到 ModelSpec 为止；条目里其余字段长什么样是 core 的事（形状只留一份，在
+ * agent 的义务到 ModelSpec 为止；条目里其余字段长什么样是 core 的事（形状只留一份，在
  * core 的测试里）。这一层要验的是「拉到了、怎么写进 settings」，不是网关怎么渲染 ——
  * 所以这三条映射出来是 name=id、窗口 200000 / 4096（core 的缺省）、没有 reasoningEfforts。
  * 字段映射本身由下面第一组用例用显式 ModelSpec 钉。
@@ -334,7 +334,7 @@ const EXPECTED_APPLIED_PROFILE: PiAiProviderProfile = {
   ],
 };
 
-/** 假宿主 describe() 里已存在的配置：别的路由 + 一个别的键（replace 必须原样保留） */
+/** 假 agent describe() 里已存在的配置：别的路由 + 一个别的键（replace 必须原样保留） */
 const EXISTING_SECTION = {
   providers: {
     buddy: {
@@ -393,7 +393,7 @@ const GATEWAY = "http://gateway.example:6450";
  * 「主机 + 路径」，去掉 query。
  *
  * 清单地址上挂什么方言（`?dialect=` 之类）是 core 的事：这一层钉整条 URL，core 换个方言
- * 这一层就红 —— 那不是宿主的行为变了。所以只钉打到哪台机器的哪条路径。
+ * 这一层就红 —— 那不是 agent 的行为变了。所以只钉打到哪台机器的哪条路径。
  */
 function listTarget(url: string): string {
   const parsed = new URL(url);
@@ -425,7 +425,7 @@ function spec(fields: Partial<ModelSpec> & { id: string }): ModelSpec {
 }
 
 /**
- * 映射用例的输入：三条 ModelSpec —— **宿主的输入**，不是网关的报文。
+ * 映射用例的输入：三条 ModelSpec —— **agent 的输入**，不是网关的报文。
  *
  * 覆盖 dsh 的收敛规则真正要处理的形状：四档齐全、带拼错的 `midium`、以及一条完全没有
  * 已知档位的（交集为空 → 整个字段省略）。价格与模态这一侧不表达（provider schema 没有
@@ -454,7 +454,7 @@ console.log("provider profile（期望值手写）");
   check("provider profile 与手写快照逐字一致", same(profile, EXPECTED_PROFILE), JSON.stringify(profile));
   // ── 契约断言：按 llm-pi-ai 的真实 schema 断言，而不是按我们自己发出去的形状 ──
   const large = profile.models[0].reasoningEfforts as Record<string, string | null>;
-  check("回归钉：reasoningEfforts 不是数组（宿主 Config 只认 false | dict）", !Array.isArray(profile.models[0].reasoningEfforts));
+  check("回归钉：reasoningEfforts 不是数组（agent Config 只认 false | dict）", !Array.isArray(profile.models[0].reasoningEfforts));
   check("档位 dict 的键顺序 = 网关顺序（不排序、不补档）", same(Object.keys(large), ["low", "medium", "high", "max"]), JSON.stringify(Object.keys(large)));
   check("键全在 dsh 封闭词汇内（schemastery 拒未知键）", Object.keys(large).every((k) => (DSH_EFFORTS as readonly string[]).includes(k)), JSON.stringify(Object.keys(large)));
   check("非 off 档位的值就是档位名本身", large.low === "low" && large.max === "max");
@@ -486,7 +486,7 @@ console.log("provider profile（期望值手写）");
   check("endpointFor：anthropic-messages 只去末尾斜杠", endpointFor("http://x:6450/", "anthropic-messages") === "http://x:6450");
 }
 
-// ── 2. provider 形状校验（旧形态宿主没有 isVolatilePath 时的替身）─────────
+// ── 2. provider 形状校验（旧形态 agent 没有 isVolatilePath 时的替身）─────────
 
 console.log("validateProviderProfile");
 
@@ -517,7 +517,7 @@ console.log("probeCapabilities（形状判定）");
   const caps = probeCapabilities(newForm.settings);
   check("最新形态：write=mutate", caps.write === "mutate");
   check("最新形态：revision=true（写 API 接受第三参）", caps.revision === true);
-  check("最新形态：宿主自己管 volatile，插件不再校验形状", caps.ownVolatileCheck === false);
+  check("最新形态：agent 自己管 volatile，插件不再校验形状", caps.ownVolatileCheck === false);
   check("最新形态：不需要合并 section", caps.mergeSection === false);
   check("最新形态：没有 problems", caps.problems.length === 0, caps.problems.join("; "));
 
@@ -560,9 +560,9 @@ console.log("pickNamespace（按 schema 的 providers 键，不写死 id）");
   check("哪条都不含 providers：报错并列出 describe 到的 id", !missing.ok && missing.error.includes("ui-settings-general") && missing.error.includes("nothing was written"));
 }
 
-// ── 5. 双宿主：同一场景走两条不同分支 ────────────────────────────────────
+// ── 5. 双 agent：同一场景走两条不同分支 ────────────────────────────────────
 
-console.log("双宿主：同一份响应 + 同一份已有配置");
+console.log("双 agent：同一份响应 + 同一份已有配置");
 
 let hostNew: FakeHost;
 let hostOld: FakeHost;
@@ -600,7 +600,7 @@ let stateOld: DshState;
 
   check("旧形态：apply 成功", reportOld.ok === true, reportOld.ok ? "" : reportOld.error);
   check("旧形态：writePath=replace（没有 mutate）", reportOld.ok && reportOld.writePath === "replace", stateOld.writePath);
-  check("旧形态：走 replace，没碰 mutate（宿主也没有）", hostOld.calls.replace === 1 && hostOld.writes[0]?.kind === "replace", JSON.stringify(hostOld.calls));
+  check("旧形态：走 replace，没碰 mutate（agent 也没有）", hostOld.calls.replace === 1 && hostOld.writes[0]?.kind === "replace", JSON.stringify(hostOld.calls));
   check("旧形态：没有 revision → 交出去的 revision 是 undefined（无并发保护）", hostOld.writes[0]?.revision === undefined);
   check(
     "旧形态：整段 section 逐字等于手写快照（别人的路由与键都在）",
@@ -664,8 +664,8 @@ console.log("SETTINGS_CONFLICT 处理");
   const plainState = createState();
   const fetchPlain = captureFetch(() => jsonResponse(SEEDED));
   const plainReport = await apply({ settings: plain.settings }, configWith(fetchPlain.fetchImpl), plainState);
-  check("没有 revision 的宿主：写一次就成（读一次写一次，无并发保护）", plainReport.ok === true && plain.writes[0].revision === undefined);
-  check("没有 revision 的宿主：writePath=mutate", plainState.writePath === "mutate", plainState.writePath);
+  check("没有 revision 的 agent：写一次就成（读一次写一次，无并发保护）", plainReport.ok === true && plain.writes[0].revision === undefined);
+  check("没有 revision 的 agent：writePath=mutate", plainState.writePath === "mutate", plainState.writePath);
 }
 
 // ── 8. 失败路径：一律不写 ────────────────────────────────────────────────
@@ -723,7 +723,7 @@ console.log("空清单 / 之后的失败不覆盖已写入的 provider");
   check("第二轮空清单：没有再写（mutate 仍只有 1 次）", host.calls.mutate === 1, String(host.calls.mutate));
   check("第二轮空清单：settings 里的 agentfacade 仍是上一轮的 3 个模型", (((routesOf(host)["agentfacade"]) as PiAiProviderProfile | undefined)?.models.length ?? 0) === 3);
   check("第二轮空清单：state.lastGood 保持 3 个模型（不置空）", state.lastGood?.models.length === 3);
-  check("第二轮空清单：警告里说明保留了几个模型（文案归宿主，state.lastError 只有原因）", emptyWarns.some((w) => w.includes("keeping the last known 3 model(s)")), emptyWarns.join(" | "));
+  check("第二轮空清单：警告里说明保留了几个模型（文案归 agent，state.lastError 只有原因）", emptyWarns.some((w) => w.includes("keeping the last known 3 model(s)")), emptyWarns.join(" | "));
   check("第二轮空清单：state.lastError 是网关的原因原文", state.lastError !== null && state.lastError.includes("listed no models"), String(state.lastError));
 
   const third = await apply({ settings: host.settings }, configWith(captureFetch(() => { throw new TypeError("fetch failed"); }).fetchImpl), state);
@@ -767,12 +767,12 @@ console.log("isVolatilePath 两侧");
   const rejects = makeHost(descriptorsFor(EXISTING_SECTION), { mutate: "revision", isVolatilePath: () => false, givesRevision: true });
   const s3 = createState();
   const r3 = await apply({ settings: rejects.settings }, configWith(captureFetch(() => jsonResponse(SEEDED)).fetchImpl), s3);
-  check("宿主说不 volatile：报错且不写", r3.ok === false && rejects.writes.length === 0 && !r3.ok && r3.error.includes("non-volatile"), r3.ok ? "" : r3.error);
+  check("agent 说不 volatile：报错且不写", r3.ok === false && rejects.writes.length === 0 && !r3.ok && r3.error.includes("non-volatile"), r3.ok ? "" : r3.error);
 }
 
 // ── 12. 没有写入能力：报错说明，绝不变玩具 ───────────────────────────────
 
-console.log("宿主没有可用的写入 API");
+console.log("agent 没有可用的写入 API");
 
 {
   const bare = makeHost(descriptorsFor(EXISTING_SECTION), {});

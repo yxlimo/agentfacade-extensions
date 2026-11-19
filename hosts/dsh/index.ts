@@ -1,5 +1,5 @@
 // dsh 插件：启动时从 AgentFacade 网关拉模型清单，写进自己的 llm-pi-ai 配置。
-// 只调 ctx.settings（宿主自己的持久化 API）；cordis.patch.yml / settings.yaml 是用户的家产，插件不碰，
+// 只调 ctx.settings（agent 自己的持久化 API）；cordis.patch.yml / settings.yaml 是用户的家产，插件不碰，
 // 拿不到可用的写入 API 就报错说明，**不**降级成写文件。每条分叉都留下痕迹：state.writePath、日志、describe()。
 
 import type { FetchOptions } from "../../core/gateway.ts";
@@ -20,9 +20,9 @@ const PREFIX = "[agentfacade-models/dsh]";
 /** dsh 传给插件的 context 里本插件用到的部分：只声明用到的成员，形状照已安装包的 `.d.ts` 缩到最小 */
 export interface DshPluginContext {
   settings?: SettingsHost;
-  /** 宿主的日志通道；没有就退到 console */
+  /** agent 的日志通道；没有就退到 console */
   logger?: { info?: (message: string) => void; warn?: (message: string) => void; error?: (message: string) => void };
-  /** 宿主启动时可以带取消信号；测试构造假的即可 */
+  /** agent 启动时可以带取消信号；测试构造假的即可 */
   signal?: AbortSignal;
 }
 
@@ -137,7 +137,7 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {},
 
   const deps: SyncDeps<PiAiProviderProfile> = {
     resolve: () => resolved,
-    // 宿主形状的映射：网关地址由 deps.resolve 给出，映射只换字段（provider.ts）
+    // agent 形状的映射：网关地址由 deps.resolve 给出，映射只换字段（provider.ts）
     toHost: (specs) => [toProviderProfile(specs, { baseUrl: resolved.gateway, api, apiKeyEnv, displayName })],
     fetchOptions,
   };
@@ -152,7 +152,7 @@ export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {},
   state.lastGood = sync.lastGood.length === 0 ? null : sync.lastGood[0];
 
   if (!outcome.ok) {
-    // 失败与取消分开：取消是宿主自己的节流（新的刷新会 abort 旧的），不是网关出问题
+    // 失败与取消分开：取消是 agent 自己的节流（新的刷新会 abort 旧的），不是网关出问题
     if (!outcome.cancelled) {
       warn(`${PREFIX} ${outcome.error} — keeping the last known ${state.lastGood?.models.length ?? 0} model(s); nothing written`);
     }

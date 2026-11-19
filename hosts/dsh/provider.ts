@@ -1,6 +1,6 @@
 // dsh 这一侧的 provider profile：ModelSpec[] → llm-pi-ai 条目的 Config。
-// 档位在这里必须收敛进封闭词汇（`reasoningEfforts` 不是字符串数组，塞错就整个宿主不可用）；
-// 其余地方薄，因为归一化与缺省值在 core。细节见 docs/design.md「宿主：DeepSeek Harness」。
+// 档位在这里必须收敛进封闭词汇（`reasoningEfforts` 不是字符串数组，塞错就整个 agent 不可用）；
+// 其余地方薄，因为归一化与缺省值在 core。细节见 docs/design.md 的 DeepSeek Harness 一节。
 
 import type { ModelSpec } from "../../core/types.ts";
 
@@ -51,7 +51,7 @@ export interface PiAiModelProfile {
   name: string;
   contextWindow: number;
   maxTokens: number;
-  /** 省略 = 沿用已安装目录的能力；写成数组会被 schemastery 拒，宿主就整个不可用 */
+  /** 省略 = 沿用已安装目录的能力；写成数组会被 schemastery 拒，agent 就整个不可用 */
   reasoningEfforts?: ReasoningEffortsProfile;
 }
 
@@ -105,7 +105,7 @@ export function toProviderProfile(specs: readonly ModelSpec[], options: Provider
 }
 
 /**
- * 旧版宿主的 `ctx.settings` 没有 `isVolatilePath`，没人替我们拦坏配置 —— 写进去就是启动时 llm-pi-ai
+ * 旧版 agent 的 `ctx.settings` 没有 `isVolatilePath`，没人替我们拦坏配置 —— 写进去就是启动时 llm-pi-ai
  * 报校验错，还会把 providers 里别的路由一起带崩。所以这条路径上由本插件自己按 Config 约定校验。
  * 返回 null 表示形状成立；否则返回一句人话，写进警告。
  */

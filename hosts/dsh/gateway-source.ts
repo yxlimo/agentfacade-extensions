@@ -15,7 +15,7 @@ export const GATEWAY_ENV_VARS = ["DSH_FACADE_GATEWAY", "FACADE_GATEWAY"] as cons
 
 /**
  * 启动时等网关的上限：apply 在启动路径上被 await，这个数字等于「网关挂掉时 dsh 多等多久」。
- * 取 2 秒，与 pi 的 1.5 秒同一量级；core 的 5 秒是通用库预算，不该由它决定宿主要等多久。
+ * 取 2 秒，与 pi 的 1.5 秒同一量级；core 的 5 秒是通用库预算，不该由它决定 agent 要等多久。
  */
 export const DEFAULT_TIMEOUT_MS = 2000;
 

@@ -1139,6 +1139,179 @@ function runMocked(env: Record<string, string>, home: string, fetchImpl: typeof 
   check("轮询失败：下一轮照样挂上", clock.scheduled.length === 1, String(clock.scheduled.length));
 }
 
+// ── /agentfacade probe：只接线，分类留给 core ─────────────────────────────
+console.log("");
+console.log("/agentfacade probe（注入 fetch；表格逐字）");
+
+const PROBE_CATALOG = { data: [{ id: "coder-a" }, { id: "coder-b" }] };
+const PROBE_WARNING = "探活结果仅供参考，不是派单闸门：探活失败不等于用不了，成功也不保证这一次请求能成";
+
+function probeReply(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
+}
+
+/** 探活专用假 fetch：目录拉取走 fetchOptions.fetchImpl，这里只会收到 chat 请求 */
+function probeFeed(respond: (model: string) => Response | Promise<Response>) {
+  const calls: Array<{ url: string; headers: Record<string, string>; body: unknown }> = [];
+  const impl = (async (input: unknown, init?: RequestInit) => {
+    const body: unknown = JSON.parse(String(init?.body ?? "{}"));
+    calls.push({ url: String(input), headers: init?.headers as Record<string, string>, body });
+    return respond(String((body as Record<string, unknown>).model ?? ""));
+  }) as unknown as typeof fetch;
+  return { impl, calls };
+}
+
+/** 延迟是实测值；快照里只把毫秒数归一，其余逐字 */
+function probeLines(text: string): string[] {
+  return text.split("\n").map((line) => line.replace(/\d+ms/, "Xms"));
+}
+
+{
+  const catalog = authFetch(() => jsonResponse(PROBE_CATALOG));
+  const feed = probeFeed((model) =>
+    model === "coder-b" ? probeReply({ error: { message: "forbidden model" } }, 401) : probeReply({}),
+  );
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, tempHome(), {
+    fetchOptions: { fetchImpl: catalog.fetchImpl },
+    probe: { fetchImpl: feed.impl },
+  });
+  await facadeModels(pi, options);
+  const seen: string[] = [];
+  await pi.command!.handler("probe", { ui: { notify: (text: string) => seen.push(text) } });
+
+  check("不给参数时探 state.models 的 id（顺序逐字）", same(feed.calls.map((call) => (call.body as { model: string }).model), ["coder-a", "coder-b"]), JSON.stringify(feed.calls.map((call) => call.body)));
+  check(
+    "探活表逐字：四列 + 失败原因 + 末尾提示",
+    same(probeLines(seen.join("\n")), [
+      "探活 2 条模型，最坏约 15 秒",
+      "模型 | 状态 | HTTP | 延迟",
+      "coder-a | ok | 200 | Xms",
+      "coder-b | auth | 401 | Xms",
+      "coder-b: forbidden model",
+      PROBE_WARNING,
+    ]),
+    JSON.stringify(probeLines(seen.join("\n"))),
+  );
+  check("提示是最后一行，且逐字是那句「不是闸门」", probeLines(seen.join("\n")).at(-1) === PROBE_WARNING && PROBE_WARNING.includes("不是派单闸门"), seen.join("\n"));
+}
+
+{
+  const catalog = authFetch(() => jsonResponse(PROBE_CATALOG));
+  const feed = probeFeed(() => probeReply({}));
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, tempHome(), {
+    fetchOptions: { fetchImpl: catalog.fetchImpl },
+    probe: { fetchImpl: feed.impl },
+  });
+  await facadeModels(pi, options);
+  const seen: string[] = [];
+  await pi.command!.handler("probe coder-z coder-a coder-z", { ui: { notify: (text: string) => seen.push(text) } });
+  check(
+    "指定名字时只探这些（core 去重、保持首次出现顺序）",
+    same(feed.calls.map((call) => (call.body as { model: string }).model), ["coder-z", "coder-a"]),
+    JSON.stringify(feed.calls.map((call) => call.body)),
+  );
+  check("表格行数跟着结果走（两条 + 表头 + 提示）", probeLines(seen.join("\n")).length === 5, JSON.stringify(probeLines(seen.join("\n"))));
+  check("进度提示的模型数按去重后算（3 个名字只报 2 条）", probeLines(seen.join("\n"))[0] === "探活 2 条模型，最坏约 15 秒", JSON.stringify(probeLines(seen.join("\n"))[0]));
+}
+
+{
+  const catalog = authFetch(() => jsonResponse(PROBE_CATALOG));
+  const feed = probeFeed((model) => {
+    if (model === "coder-a") throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    return probeReply({});
+  });
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, tempHome(), {
+    fetchOptions: { fetchImpl: catalog.fetchImpl },
+    probe: { fetchImpl: feed.impl },
+  });
+  await facadeModels(pi, options);
+  const seen: string[] = [];
+  await pi.command!.handler("probe coder-a coder-b", { ui: { notify: (text: string) => seen.push(text) } });
+  const lines = probeLines(seen.join("\n"));
+  check("一条模型超时不中断整张表", same(lines.slice(1, 4), ["模型 | 状态 | HTTP | 延迟", "coder-a | timeout | - | Xms", "coder-b | ok | 200 | Xms"]), JSON.stringify(lines));
+  check("失败行的原因也打印出来，提示仍在末尾", lines.includes("coder-a: aborted") && lines.at(-1) === PROBE_WARNING, JSON.stringify(lines));
+}
+
+{
+  const token = "sk-probe-pi-9f2a";
+  const catalog = authFetch(() => jsonResponse(PROBE_CATALOG));
+  const feed = probeFeed(() => probeReply({ error: { message: `bad key ${token} accepted` } }, 401));
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: MOCK_GATEWAY, PI_FACADE_API_KEY: token }, tempHome(), {
+    fetchOptions: { fetchImpl: catalog.fetchImpl },
+    probe: { fetchImpl: feed.impl },
+  });
+  await facadeModels(pi, options);
+  const seen: string[] = [];
+  await pi.command!.handler("probe coder-a", { ui: { notify: (text: string) => seen.push(text) } });
+  check("探活请求带 Bearer <key>", feed.calls[0].headers.authorization === `Bearer ${token}`, JSON.stringify(feed.calls[0].headers));
+  check("错误体回显密钥时输出只出现 ***", !seen.join("\n").includes(token) && seen.join("\n").includes("bad key *** accepted"), seen.join("\n"));
+}
+
+{
+  // 目录拉到空清单 → 不注册；此时探活不该对着空清单发请求，只给下一步
+  const catalog = authFetch(() => jsonResponse({ data: [] }));
+  const feed = probeFeed(() => probeReply({}));
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, tempHome(), {
+    fetchOptions: { fetchImpl: catalog.fetchImpl },
+    probe: { fetchImpl: feed.impl },
+  });
+  await facadeModels(pi, options);
+  const seen: string[] = [];
+  await pi.command!.handler("probe", { ui: { notify: (text: string) => seen.push(text) } });
+  check("没有已注册模型时提示先 refresh 或给模型名", seen.join("\n").includes("先 /agentfacade refresh"), seen.join("\n"));
+  check("没有已注册模型时不发探活请求", feed.calls.length === 0, String(feed.calls.length));
+}
+
+{
+  const catalog = authFetch(() => jsonResponse(PROBE_CATALOG));
+  const seen: string[] = [];
+  let atFirstFetch: string[] = [];
+  const feed = probeFeed(() => {
+    atFirstFetch = [...seen];
+    return probeReply({});
+  });
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, tempHome(), {
+    fetchOptions: { fetchImpl: catalog.fetchImpl },
+    probe: { fetchImpl: feed.impl },
+  });
+  await facadeModels(pi, options);
+  await pi.command!.handler("probe coder-a", { ui: { notify: (text: string) => seen.push(text) } });
+  check("进度在第一个请求发出前就 notify：逐字", same(atFirstFetch, ["探活 1 条模型，最坏约 15 秒"]), JSON.stringify(atFirstFetch));
+  check("结果在进度之后 notify", seen.length === 2 && seen[1].includes("coder-a | ok"), JSON.stringify(seen));
+}
+
+{
+  for (const mode of ["signal", "getSignal"] as const) {
+    const catalog = authFetch(() => jsonResponse(PROBE_CATALOG));
+    const feed = probeFeed(() => probeReply({}));
+    const { pi, options } = runFactory({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, tempHome(), {
+      fetchOptions: { fetchImpl: catalog.fetchImpl },
+      probe: { fetchImpl: feed.impl },
+    });
+    await facadeModels(pi, options);
+    const controller = new AbortController();
+    controller.abort();
+    const seen: string[] = [];
+    const ctx =
+      mode === "signal"
+        ? { ui: { notify: (text: string) => seen.push(text) }, signal: controller.signal }
+        : { ui: { notify: (text: string) => seen.push(text) }, getSignal: () => controller.signal };
+    await pi.command!.handler("probe coder-a", ctx);
+    check(
+      `ctx.${mode} 的取消信号透传到 core：不发请求，逐字输出 cancelled`,
+      feed.calls.length === 0 &&
+        same(probeLines(seen.join("\n")), [
+          "探活 1 条模型，最坏约 15 秒",
+          "模型 | 状态 | HTTP | 延迟",
+          "coder-a | cancelled | - | Xms",
+          "coder-a: cancelled by caller",
+          PROBE_WARNING,
+        ]),
+      JSON.stringify({ calls: feed.calls.length, lines: probeLines(seen.join("\n")) }),
+    );
+  }
+}
+
 console.log("");
 console.log(fail === 0 ? `全部通过（${pass} 条）` : `${fail} 条失败，${pass} 条通过`);
 process.exit(fail === 0 ? 0 : 1);

@@ -103,6 +103,6 @@
         "test"
       ]
     },
-    "writeScope": ["/tmp/pi-review-reports"]
+    "writeScope": [".pi/review-reports"]
   }
 }

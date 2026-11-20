@@ -2,3 +2,5 @@ node_modules/
 dist/
 .probe/
 .build/
+# review 角色的报告落在仓库内（/tmp 在沙箱里是不可写的私有 tmpfs）
+.pi/review-reports/

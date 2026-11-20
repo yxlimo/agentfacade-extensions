@@ -31,6 +31,8 @@ import {
   modelsUrl,
   resolveGateway,
 } from "../gateway.ts";
+import { readAuthKeyAt, resolveAuthKey, writeAuthKeyAt } from "../auth.ts";
+import { createCatalogPoller, DEFAULT_REFRESH_MS, MIN_REFRESH_MS, resolveRefreshMs, type PollerTimers } from "../poll.ts";
 import {
   DEFAULT_GATEWAY,
   normalizeGatewayInput,
@@ -87,13 +89,20 @@ function same(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-/** 注入用的假 fetch：记录被请求的地址/方法/accept，回答由 respond 决定 */
+/** 注入用的假 fetch：记录被请求的地址/方法/accept（带了密钥还有 authorization），回答由 respond 决定 */
 function captureFetch(respond: (url: string, init?: RequestInit) => Response | Promise<Response>) {
-  const calls: Array<{ url: string; method: string; accept: string }> = [];
+  const calls: Array<{ url: string; method: string; accept: string; authorization?: string }> = [];
   const impl = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     const headers = (init?.headers ?? {}) as Record<string, string>;
-    calls.push({ url, method: init?.method ?? "", accept: headers.accept ?? "" });
+    // authorization 只在真的带了的时候记录：没带密钥的既有快照（url/method/accept 三格）保持原样
+    const authorization = headers.authorization ?? "";
+    calls.push({
+      url,
+      method: init?.method ?? "",
+      accept: headers.accept ?? "",
+      ...(authorization !== "" ? { authorization } : {}),
+    });
     return respond(url, init);
   }) as unknown as typeof fetch;
   return { impl, calls };
@@ -1151,6 +1160,285 @@ function deps(overrides: Partial<SyncDeps<HostModel>> = {}): SyncDeps<HostModel>
   check("core 自己不碰 registered 标志（注册是 agent 的事）", state.registered === false, String(state.registered));
 }
 
+
+// ── 密钥：auth.json 与解析链 ─────────────────────────────────────────────
+
+console.log("");
+console.log("auth.json（形状学 pi 的 auth.json；home 注入临时目录）");
+
+/** 造一份 auth.json（测试直接写文件，writeAuthKeyAt 的用例另行覆盖写入路径） */
+function seedAuth(home: string, body: string): string {
+  const dir = path.join(home, ".config", "agentfacade");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, "auth.json");
+  fs.writeFileSync(file, body);
+  return file;
+}
+
+{
+  // 写入 → 读回闭环；文件形状与权限逐字钉住（pi 的 auth.json 就长这样，别悄悄长出别的键）
+  const home = tempHome();
+  const written = writeAuthKeyAt(home, "secret-1");
+  const file = path.join(home, ".config", "agentfacade", "auth.json");
+  check("写成功并返回文件路径", written.ok && written.file === file, JSON.stringify(written));
+  check(
+    "文件内容逐字：pi 的 auth.json 形状、两格缩进、加一个换行",
+    fs.readFileSync(file, "utf8") === '{\n  "agentfacade": {\n    "type": "api_key",\n    "key": "secret-1"\n  }\n}\n',
+    JSON.stringify(fs.readFileSync(file, "utf8")),
+  );
+  check("文件权限是 0600（里面是明文密钥）", (fs.statSync(file).mode & 0o777) === 0o600, (fs.statSync(file).mode & 0o777).toString(8));
+  check("写入的密钥被读回来", same(readAuthKeyAt(home), { value: "secret-1" }), JSON.stringify(readAuthKeyAt(home)));
+}
+
+{
+  // 原子性 observable 的一半：覆盖写不留临时文件，内容被替换
+  const home = tempHome();
+  writeAuthKeyAt(home, "first");
+  const again = writeAuthKeyAt(home, "second");
+  const dir = path.join(home, ".config", "agentfacade");
+  check("覆盖写成功且内容是新的", again.ok && fs.readFileSync(path.join(dir, "auth.json"), "utf8").includes("second"), JSON.stringify(again));
+  check("目录里没有残留的临时文件（rename 用掉了它）", same(fs.readdirSync(dir), ["auth.json"]), JSON.stringify(fs.readdirSync(dir)));
+}
+
+{
+  // 写入守卫：空密钥拒绝、写失败带原因返回（调用方据此向用户报错，token 永远不出现在错误里）
+  const home = tempHome();
+  const refused = writeAuthKeyAt(home, "   ");
+  check("空密钥拒绝且什么都不写", !refused.ok && refused.error.includes("empty") && fs.existsSync(path.join(home, ".config")) === false, JSON.stringify(refused));
+  fs.writeFileSync(path.join(home, ".config"), "not a directory");
+  const blocked = writeAuthKeyAt(home, "k");
+  check("目录建不出来 → 写失败并带原因", !blocked.ok && blocked.error.includes("cannot write"), JSON.stringify(blocked));
+}
+
+{
+  // 读取的宽容（没有 = 没配）与严格（坏了 = 报错）分开钉
+  check("文件不存在 → 没有密钥（不是错误）", same(readAuthKeyAt(tempHome()), { value: "" }), JSON.stringify(readAuthKeyAt(tempHome())));
+  const noEntry = tempHome();
+  seedAuth(noEntry, '{"other": {"type": "api_key", "key": "x"}}');
+  check("文件存在但没有我们那一项 → 没有密钥", same(readAuthKeyAt(noEntry), { value: "" }), JSON.stringify(readAuthKeyAt(noEntry)));
+  const broken = tempHome();
+  seedAuth(broken, "{ not json");
+  const bad = readAuthKeyAt(broken);
+  check("JSON 坏 → 带原因的失败（不是当没配）", !("value" in bad) && bad.error.includes("not valid JSON") && bad.error.includes("auth.json"), JSON.stringify(bad));
+  const wrongType = tempHome();
+  seedAuth(wrongType, '{"agentfacade": {"type": "oauth", "key": "x"}}');
+  const typeError = readAuthKeyAt(wrongType);
+  check("type 不是 api_key → 报错点名实际类型", !("value" in typeError) && typeError.error.includes('"oauth"'), JSON.stringify(typeError));
+  const noKey = tempHome();
+  seedAuth(noKey, '{"agentfacade": {"type": "api_key"}}');
+  check("没有非空 key 字段 → 报错", !("value" in readAuthKeyAt(noKey)), JSON.stringify(readAuthKeyAt(noKey)));
+}
+
+console.log("");
+console.log("resolveAuthKey（<AGENT> 环境变量 → 共用变量 → auth.json → 默认没有）");
+
+{
+  const KEY_ENVS = ["TEST_AGENT_KEY", "TEST_SHARED_KEY"];
+  const home = tempHome();
+  seedAuth(home, '{"agentfacade": {"type": "api_key", "key": "from-file"}}');
+  const own = resolveAuthKey({ envVarNames: KEY_ENVS, env: { TEST_AGENT_KEY: "from-agent", TEST_SHARED_KEY: "from-shared" }, home });
+  check("agent 自己的环境变量最高", same(own, { ok: true, key: "from-agent", from: "TEST_AGENT_KEY" }), JSON.stringify(own));
+  const shared = resolveAuthKey({ envVarNames: KEY_ENVS, env: { TEST_SHARED_KEY: "from-shared" }, home });
+  check("共用变量赢过文件", same(shared, { ok: true, key: "from-shared", from: "TEST_SHARED_KEY" }), JSON.stringify(shared));
+  const fromFile = resolveAuthKey({ envVarNames: KEY_ENVS, env: {}, home });
+  check("环境变量都空 → auth.json", same(fromFile, { ok: true, key: "from-file", from: "~/.config/agentfacade/auth.json" }), JSON.stringify(fromFile));
+  const nowhere = resolveAuthKey({ envVarNames: KEY_ENVS, env: {}, home: tempHome() });
+  check("哪里都没有 → 没有密钥（不是错误，key 是空串）", same(nowhere, { ok: true, key: "", from: "none" }), JSON.stringify(nowhere));
+  const brokenHome = tempHome();
+  seedAuth(brokenHome, "{ not json");
+  const broken = resolveAuthKey({ envVarNames: KEY_ENVS, env: {}, home: brokenHome });
+  check("auth.json 坏 → 报错带原因，不悄悄当没配", !broken.ok && broken.error.includes("not valid JSON"), JSON.stringify(broken));
+  const blank = resolveAuthKey({ envVarNames: KEY_ENVS, env: { TEST_AGENT_KEY: "  " }, home: tempHome() });
+  check("空白的环境变量算没配，落到下一级", blank.ok && blank.from === "none", JSON.stringify(blank));
+}
+
+console.log("");
+console.log("catalog 请求的 Authorization（有密钥带 Bearer，没有就不带）");
+
+{
+  const { impl, calls } = captureFetch(() => jsonResponse({ data: [{ id: "m" }] }));
+  await fetchModelList("http://gw.example:6450", { fetchImpl: impl, apiKey: "k1" });
+  check("有密钥 → Authorization: Bearer <key>", calls[0]?.authorization === "Bearer k1", JSON.stringify(calls[0]));
+  const bare = captureFetch(() => jsonResponse({ data: [{ id: "m" }] }));
+  await fetchModelList("http://gw.example:6450", { fetchImpl: bare.impl });
+  check("没有密钥 → 不带 authorization（维持原行为）", bare.calls[0] !== undefined && !("authorization" in bare.calls[0]), JSON.stringify(bare.calls[0]));
+  const emptyKey = captureFetch(() => jsonResponse({ data: [{ id: "m" }] }));
+  await fetchModelList("http://gw.example:6450", { fetchImpl: emptyKey.impl, apiKey: "" });
+  check("空串密钥按没有处理", emptyKey.calls[0] !== undefined && !("authorization" in emptyKey.calls[0]), JSON.stringify(emptyKey.calls[0]));
+}
+
+console.log("");
+console.log("resolveRefreshMs（env → config.json refreshMs → 默认 300000，下限 30000）");
+
+{
+  const REFRESH_ENVS = ["TEST_REFRESH_ENV"];
+  const plain = resolveRefreshMs({ envVarNames: REFRESH_ENVS, env: {}, home: tempHome() });
+  check("默认 300000（5 分钟）", plain === DEFAULT_REFRESH_MS && DEFAULT_REFRESH_MS === 300000, String(plain));
+  check("环境变量覆盖默认值", resolveRefreshMs({ envVarNames: REFRESH_ENVS, env: { TEST_REFRESH_ENV: "120000" }, home: tempHome() }) === 120000, "");
+  const cfgHome = tempHome();
+  seedConfig(cfgHome, '{"gateway": "http://gw.example:6450", "refreshMs": 60000}');
+  check("config.json 的 refreshMs 生效", resolveRefreshMs({ envVarNames: REFRESH_ENVS, env: {}, home: cfgHome }) === 60000, "");
+  check("环境变量赢过 config.json", resolveRefreshMs({ envVarNames: REFRESH_ENVS, env: { TEST_REFRESH_ENV: "45000" }, home: cfgHome }) === 45000, "");
+  check("配得更小按 30000 算（env）", resolveRefreshMs({ envVarNames: REFRESH_ENVS, env: { TEST_REFRESH_ENV: "1000" }, home: tempHome() }) === MIN_REFRESH_MS, "");
+  const smallHome = tempHome();
+  seedConfig(smallHome, '{"refreshMs": 1}');
+  check("配得更小按 30000 算（config）", resolveRefreshMs({ envVarNames: REFRESH_ENVS, env: {}, home: smallHome }) === MIN_REFRESH_MS, "");
+  const junkHome = tempHome();
+  seedConfig(junkHome, '{"refreshMs": "soon"}');
+  check("refreshMs 不是数字 → 当没配，退默认", resolveRefreshMs({ envVarNames: REFRESH_ENVS, env: {}, home: junkHome }) === DEFAULT_REFRESH_MS, "");
+  const brokenHome = tempHome();
+  seedConfig(brokenHome, "{ not json");
+  check("config.json JSON 坏 → 间隔照常给默认（间隔不是地址，坏数字不该挡住模型同步）", resolveRefreshMs({ envVarNames: REFRESH_ENVS, env: {}, home: brokenHome }) === DEFAULT_REFRESH_MS, "");
+  check("环境变量不是数字 → 落到 config.json", resolveRefreshMs({ envVarNames: REFRESH_ENVS, env: { TEST_REFRESH_ENV: "soon" }, home: cfgHome }) === 60000, "");
+}
+
+console.log("");
+console.log("createCatalogPoller（注入定时器；unref / 不重复挂载 / 变了才记一行）");
+
+/** 手动时钟：set 记录 (ms, unref 与否) 并把 handler 排进 pending；clear 清空 pending */
+function manualTimers() {
+  const calls: Array<{ ms: number; unrefed: boolean }> = [];
+  const pending: Array<{ fn: () => void }> = [];
+  let cleared = 0;
+  const timers: PollerTimers = {
+    set(fn, ms) {
+      const index = calls.length;
+      calls.push({ ms, unrefed: false });
+      pending.push({ fn });
+      return {
+        unref() {
+          if (calls[index]) calls[index].unrefed = true;
+        },
+      };
+    },
+    clear() {
+      cleared++;
+      pending.length = 0;
+    },
+  };
+  return {
+    timers,
+    calls,
+    cleared: () => cleared,
+    pendingCount: () => pending.length,
+    runNext() {
+      const next = pending.shift();
+      if (next) next.fn();
+    },
+  };
+}
+
+/** 让异步的 tick 走完（poll → 比较 → 排下一轮全是微任务） */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+{
+  const clock = manualTimers();
+  const logs: string[] = [];
+  let list: readonly string[] = ["a", "b"];
+  const poller = createCatalogPoller({
+    intervalMs: 5000,
+    initialIds: ["a", "b"],
+    poll: async () => list,
+    log: (message) => logs.push(message),
+    timers: clock.timers,
+  });
+  poller.start();
+  check("start 挂一个定时器，间隔就是配置的 intervalMs", clock.calls.length === 1 && clock.calls[0]?.ms === 5000, JSON.stringify(clock.calls));
+  check("定时器被 unref（轮询不能阻止进程退出）", clock.calls[0]?.unrefed === true, JSON.stringify(clock.calls));
+  poller.start();
+  check("重复 start 不挂第二个定时器", clock.calls.length === 1, String(clock.calls.length));
+  check("running 为 true", poller.running === true);
+
+  clock.runNext();
+  await flush();
+  check("清单没变 → 不记日志，排下一轮", logs.length === 0 && clock.pendingCount() === 1, JSON.stringify({ logs, pending: clock.pendingCount() }));
+
+  list = ["b", "c", "d"];
+  clock.runNext();
+  await flush();
+  check("清单变了 → 恰好一行，写明增删", logs.length === 1 && logs[0] === "model catalog changed: added c, d; removed a", JSON.stringify(logs));
+
+  clock.runNext();
+  await flush();
+  check("基准更新后，同样的清单不再记", logs.length === 1, JSON.stringify(logs));
+
+  poller.stop();
+  check("stop 清掉挂着的定时器", clock.cleared() === 1 && clock.pendingCount() === 0 && poller.running === false, JSON.stringify({ cleared: clock.cleared(), pending: clock.pendingCount() }));
+  const after = logs.length;
+  clock.runNext();
+  await flush();
+  check("stop 之后 poll 不再被调、不再排轮", logs.length === after && clock.calls.length === 4, JSON.stringify({ logs, calls: clock.calls.length }));
+}
+
+{
+  const clock = manualTimers();
+  const logs: string[] = [];
+  let fail = false;
+  let list: readonly string[] = ["a"];
+  const poller = createCatalogPoller({
+    intervalMs: 1,
+    initialIds: ["a"],
+    poll: async () => (fail ? null : list),
+    log: (message) => logs.push(message),
+    timers: clock.timers,
+  });
+  poller.start();
+  fail = true;
+  clock.runNext();
+  await flush();
+  check("poll 失败（null）→ 不记变化日志", logs.length === 0, JSON.stringify(logs));
+  check("失败后照排下一轮（保留基准，下一轮再试）", clock.pendingCount() === 1, String(clock.pendingCount()));
+  fail = false;
+  list = ["a", "b"];
+  clock.runNext();
+  await flush();
+  check(
+    "失败恢复后基准还是失败前那份 → 新增 b 记一行",
+    logs.length === 1 && logs[0] === "model catalog changed: added b; removed none",
+    JSON.stringify(logs),
+  );
+
+  // 抛异常的 poll 用独立的时钟：clear 是全清的，两个 poller 共享会互相清掉对方的轮次
+  const throwClock = manualTimers();
+  const throwing = createCatalogPoller({
+    intervalMs: 1,
+    initialIds: ["x"],
+    poll: async () => {
+      throw new Error("boom");
+    },
+    log: (message) => logs.push(message),
+    timers: throwClock.timers,
+  });
+  throwing.start();
+  throwClock.runNext();
+  await flush();
+  check("poll 抛异常不外溢、按失败算（不记日志、照排下一轮）", logs.length === 1 && throwClock.pendingCount() === 1, JSON.stringify({ logs, pending: throwClock.pendingCount() }));
+  throwing.stop();
+  poller.stop();
+
+}
+{
+  // 默认定时器走真 setTimeout + unref：跑得动、stop 得掉、不挂住进程
+  let polls = 0;
+  const poller = createCatalogPoller({
+    intervalMs: 20,
+    initialIds: ["a"],
+    poll: async () => {
+      polls++;
+      return ["a"];
+    },
+    log: () => {},
+  });
+  poller.start();
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  check("默认定时器（真 setTimeout + unref）真的在跑", polls >= 2, String(polls));
+  poller.stop();
+  const stopped = polls;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  check("stop 之后默认定时器不再触发", polls === stopped, `${polls} vs ${stopped}`);
+}
 // ── 跨 agent 契约 ───────────────────────────────────────────────────────────
 
 console.log("");
@@ -1212,17 +1500,23 @@ console.log("core 的归属规则（禁用词扫描）");
   // capabilities.tools），catalog.ts 必须读它；但它出现在别的 core 文件里、或以 `capabilities:` 的
   // key 位置出现，就说明 agent 的形状漏进了契约。下面那条 key 位置断言是这条口子的补偿。
   const PAYLOAD_ONLY = "capabilities";
-  const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts", "gateway-config.ts"];
+  const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts", "gateway-config.ts", "auth.ts", "poll.ts"];
+  // 「agentfacade」是工具链自己的目录名/项名：gateway-config.ts 里只许出现在 config.json 路径上，
+  // auth.ts 整份文件管的就是 auth.json（路径、项名、报错文案全是它）。
+  // 其它文件出现一次就算越界。
+  const AGENTFACADE_EXEMPT: Record<string, string | null> = { "gateway-config.ts": "config.json", "auth.ts": null };
   const hits: string[] = [];
   const keyHits: string[] = [];
   for (const file of files) {
     const text = fs.readFileSync(path.join(CORE_DIR, file), "utf8");
     for (const word of FORBIDDEN) {
-      // gateway-config.ts 里的 "agentfacade" 只允许出现在配置文件路径（~/.config/agentfacade/config.json）
-      // —— 那是工具链自己的目录名。豁免判定按行：该行必须同时提到 config.json，出现在别处照样算越界
-      if (word === "agentfacade" && file === "gateway-config.ts") {
-        const offender = text.split("\n").find((line) => line.includes("agentfacade") && !line.includes("config.json"));
-        if (offender !== undefined) hits.push(`${file}: agentfacade outside the config path`);
+      if (word === "agentfacade" && file in AGENTFACADE_EXEMPT) {
+        const tail = AGENTFACADE_EXEMPT[file];
+        const offender =
+          tail === null
+            ? undefined
+            : text.split("\n").find((line) => line.includes("agentfacade") && !line.includes(tail));
+        if (offender !== undefined) hits.push(`${file}: agentfacade outside the ${tail} path`);
         continue;
       }
       if (text.includes(word)) hits.push(`${file}: ${word}`);
@@ -1230,10 +1524,10 @@ console.log("core 的归属规则（禁用词扫描）");
     if (file !== "catalog.ts" && text.includes(PAYLOAD_ONLY)) hits.push(`${file}: ${PAYLOAD_ONLY}`);
     if (/(^|[\s,{])capabilities\s*:/m.test(text)) keyHits.push(file);
   }
-  check("core 的五个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
+  check("core 的七个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
   check("capabilities 只在读报文的位置，没变成我们自己的字段名", keyHits.length === 0, JSON.stringify(keyHits));
   check(
-    "扫描确实读到了五个源文件（不然上一行永远绿）",
+    "扫描确实读到了七个源文件（不然上一行永远绿）",
     files.every((file) => fs.existsSync(path.join(CORE_DIR, file))),
     JSON.stringify(files),
   );

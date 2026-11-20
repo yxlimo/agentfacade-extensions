@@ -36,6 +36,7 @@ import {
 import { pickNamespace, probeCapabilities, type SettingsDescriptor, type SettingsHost, type SettingsPathOp } from "../settings-sync.ts";
 import type { ModelSpec } from "../../../core/types.ts";
 import { DEFAULT_GATEWAY, DEFAULT_TIMEOUT_MS, resolveDshGateway } from "../gateway-source.ts";
+import type { PollerTimers } from "../../../core/poll.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -894,6 +895,199 @@ console.log("cordis effect 约定");
     JSON.stringify(state.report),
   );
   check("apply 真的写了一次", host.writes.length === 1, JSON.stringify(host.writes));
+}
+
+// ── 15. 密钥、只拉不写与轮询 ─────────────────────────────────────────────
+console.log("\n密钥、只拉不写与轮询（注塑 fetch / 假时钟，全部离线）");
+
+interface FetchCapture {
+  fetchImpl: typeof fetch;
+  headers: Array<Record<string, string> | undefined>;
+}
+function captureAuthFetch(respond: () => Response | Promise<Response>): FetchCapture {
+  const headers: Array<Record<string, string> | undefined> = [];
+  const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+    headers.push(init?.headers as Record<string, string> | undefined);
+    return respond();
+  }) as unknown as typeof fetch;
+  return { fetchImpl, headers };
+}
+
+interface FakeTimer {
+  handler: () => void;
+  ms: number;
+  unrefHits: number;
+}
+interface FakeClock {
+  timers: PollerTimers;
+  /** 只保留挂着的定时器：轮询「没变不写」与「二次 apply 不叠钟」都数它 */
+  scheduled: FakeTimer[];
+  fire(): Promise<void>;
+}
+function fakeClock(): FakeClock {
+  const scheduled: FakeTimer[] = [];
+  const pending: Array<{ timer: FakeTimer; handle: { unref(): void } }> = [];
+  const timers: PollerTimers = {
+    set(handler, ms) {
+      const timer: FakeTimer = { handler, ms, unrefHits: 0 };
+      const handle = {
+        unref() {
+          timer.unrefHits++;
+        },
+      };
+      scheduled.push(timer);
+      pending.push({ timer, handle });
+      return handle;
+    },
+    clear(handle) {
+      const index = pending.findIndex((entry) => entry.handle === handle);
+      if (index >= 0) {
+        scheduled.splice(scheduled.indexOf(pending[index].timer), 1);
+        pending.splice(index, 1);
+      }
+    },
+  };
+  return {
+    timers,
+    scheduled,
+    async fire() {
+      const entry = pending.shift();
+      if (!entry) throw new Error("no pending timer");
+      scheduled.splice(scheduled.indexOf(entry.timer), 1);
+      entry.timer.handler();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    },
+  };
+}
+
+function modernHost(): FakeHost {
+  return makeHost(descriptorsFor(EXISTING_SECTION), { mutate: "revision", isVolatilePath: () => true, givesRevision: true });
+}
+
+{
+  const feed = captureAuthFetch(() => jsonResponse(SEEDED));
+  const host = modernHost();
+  const state = createState();
+  const report = await syncNow(
+    { settings: host.settings },
+    configWith(feed.fetchImpl, { env: { DSH_FACADE_API_KEY: "sk-dsh-env-8a" }, home: tempHome() }),
+    state,
+  );
+  check(
+    "DSH_FACADE_API_KEY → 目录请求头逐字是 Bearer <key>",
+    report.ok && same(feed.headers, [{ accept: "application/json", authorization: "Bearer sk-dsh-env-8a" }]),
+    JSON.stringify(feed.headers),
+  );
+  const profile = routesOf(host)["agentfacade"] as PiAiProviderProfile | undefined;
+  check(
+    "密钥只用于拉目录，不写进 settings（配置里只有环境变量名）",
+    profile?.apiKeyEnv === DEFAULT_API_KEY_ENV && !("apiKey" in (profile ?? {})),
+    JSON.stringify(Object.keys(profile ?? {})),
+  );
+}
+
+{
+  const feed = captureAuthFetch(() => jsonResponse(SEEDED));
+  const state = createState();
+  const report = await syncNow({ settings: modernHost().settings }, configWith(feed.fetchImpl, { home: tempHome() }), state);
+  check("没有密钥 → 请求头只有 accept，不带 authorization", report.ok && same(feed.headers, [{ accept: "application/json" }]), JSON.stringify(feed.headers));
+}
+
+{
+  // 轮询走这一档：清单进 state.lastGood 就够，写配置是「真的变了」那一步的事
+  const host = modernHost();
+  const state = createState();
+  const feed = captureAuthFetch(() => jsonResponse(SEEDED));
+  const report = await syncNow({ settings: host.settings }, configWith(feed.fetchImpl, { home: tempHome() }), state, { write: false });
+  check("write:false 拉到清单并更新 state.lastGood", report.ok && state.lastGood?.models.length === 3, JSON.stringify(report));
+  check(
+    "write:false 一次 settings 写入都没有",
+    host.writes.length === 0 && host.calls.mutate === 0 && host.calls.replace === 0 && host.calls.update === 0,
+    JSON.stringify(host.calls),
+  );
+  check(
+    "write:false 不留写入痕迹（writePath 为空、settings 里没有 agentfacade）",
+    state.writePath === "" && routesOf(host)["agentfacade"] === undefined,
+    JSON.stringify({ writePath: state.writePath, routes: Object.keys(routesOf(host)) }),
+  );
+}
+
+{
+  const hostDefault = modernHost();
+  const stateDefault = createState();
+  const defaultReport = await syncNow(
+    { settings: hostDefault.settings },
+    configWith(captureAuthFetch(() => jsonResponse(SEEDED)).fetchImpl, { home: tempHome() }),
+    stateDefault,
+  );
+  check("默认档仍然写一次", defaultReport.ok && hostDefault.writes.length === 1 && stateDefault.writePath === "mutate+revision", JSON.stringify(hostDefault.calls));
+
+  const hostExplicit = modernHost();
+  const stateExplicit = createState();
+  const explicitReport = await syncNow(
+    { settings: hostExplicit.settings },
+    configWith(captureAuthFetch(() => jsonResponse(SEEDED)).fetchImpl, { home: tempHome() }),
+    stateExplicit,
+    { write: true },
+  );
+  check("{write:true} 仍然写一次", explicitReport.ok && hostExplicit.writes.length === 1 && stateExplicit.writePath === "mutate+revision", JSON.stringify(hostExplicit.calls));
+}
+
+{
+  const clock = fakeClock();
+  const feed = captureAuthFetch(() => jsonResponse(SEEDED));
+  const state = createState();
+  await apply(
+    { settings: modernHost().settings },
+    configWith(feed.fetchImpl, {
+      env: { DSH_FACADE_REFRESH_MS: "45000", FACADE_REFRESH_MS: "99000" },
+      home: tempHome(),
+      timers: clock.timers,
+    }),
+    state,
+  );
+  check(
+    "apply 挂轮询，间隔来自 DSH_FACADE_REFRESH_MS（不是共用变量或默认）",
+    clock.scheduled.length === 1 && clock.scheduled[0].ms === 45000,
+    JSON.stringify(clock.scheduled.map((t) => t.ms)),
+  );
+  check("apply 只挂一个定时器并记在 state.poller", state.poller !== null && clock.scheduled[0]?.unrefHits === 1, JSON.stringify(clock.scheduled));
+}
+
+{
+  let payload: unknown = SEEDED;
+  const clock = fakeClock();
+  const feed = captureAuthFetch(() => jsonResponse(payload));
+  const host = modernHost();
+  const state = createState();
+  const config = configWith(feed.fetchImpl, { env: { DSH_FACADE_REFRESH_MS: "45000" }, home: tempHome(), timers: clock.timers });
+  await apply({ settings: host.settings }, config, state);
+  check("（前置）启动时写一次", host.writes.length === 1, JSON.stringify(host.calls));
+  await clock.fire();
+  check("清单没变：拉了但不再写 settings", feed.headers.length === 2 && host.writes.length === 1, JSON.stringify({ fetches: feed.headers.length, writes: host.writes.length }));
+  check("清单没变：仍挂下一轮", clock.scheduled.length === 1 && clock.scheduled[0].ms === 45000, JSON.stringify(clock.scheduled.map((t) => t.ms)));
+  payload = { data: SEEDED.data.slice(0, 2) };
+  await clock.fire();
+  check("清单变了：settings 再写一次", host.writes.length === 2, JSON.stringify(host.calls));
+  check(
+    "再写进去的是新清单（两条 id 逐字）",
+    same((routesOf(host)["agentfacade"] as PiAiProviderProfile | undefined)?.models.map((m) => m.id), SEEDED.data.slice(0, 2).map((d) => d.id)),
+    JSON.stringify((routesOf(host)["agentfacade"] as PiAiProviderProfile | undefined)?.models.map((m) => m.id)),
+  );
+}
+
+{
+  // 热重载会拿同一份 state 再 apply 一次：第二次同步照做，但不许叠出第二个定时器
+  const clock = fakeClock();
+  const feed = captureAuthFetch(() => jsonResponse(SEEDED));
+  const host = modernHost();
+  const state = createState();
+  const config = configWith(feed.fetchImpl, { home: tempHome(), timers: clock.timers });
+  await apply({ settings: host.settings }, config, state);
+  const poller = state.poller;
+  await apply({ settings: host.settings }, config, state);
+  check("二次 apply 不增加定时器，用的还是同一个 poller", clock.scheduled.length === 1 && state.poller === poller, JSON.stringify({ timers: clock.scheduled.length, same: state.poller === poller }));
+  check("二次 apply 仍然同步了一次（写了第二次）", host.writes.length === 2, JSON.stringify(host.calls));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

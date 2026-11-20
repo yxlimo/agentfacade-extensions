@@ -95,6 +95,29 @@ interface ModelSpec {
 - 这份文件是我们自己的，可以写；agent 的配置文件永远不写。
 - `/agentfacade connect` 的归一化规则：没有 scheme 补 `http://`；scheme 是 `http` 且没写端口时补 `:6450`（`https` 不补，443 是它自己的默认）；末尾斜杠去掉；非 http(s) 一律拒绝且不写文件。写完立刻刷新一次——拉不到只报告原因、不回滚文件，换网络是正常操作。
 
+## 密钥从哪来
+
+与地址同一套分层：环境变量名是 agent 的事实，文件是全机一份。
+
+```text
+<PREFIX>_FACADE_API_KEY → FACADE_API_KEY → ~/.config/agentfacade/auth.json → 没有
+```
+
+- 形状与 pi 自己的 `auth.json` 一致（`{ "<provider>": { "type": "api_key", "key": "…" } }`，0600，原子写）：pi 用户已经熟悉这个文件，密钥落盘就不该再造一个私有格式。
+- 坏 auth.json **只 warn、不中断**，降级成空密钥：这与地址那条「坏地址报错」相反，因为地址错了会连到错的地方，密钥错了只是不带鉴权，没必要挡住模型同步。
+- 三个 agent 共用 `resolveHostAuthKey({ prefix })`：拼环境变量名的规则只写一处，否则三份实现里迟早有一份拼错。
+- 密钥用于两处：拉目录的请求头、agent 自己的模型请求。DeepSeek Harness 的配置只承载 `apiKeyEnv`（名字），密钥本身不进配置文件。
+
+## 定时轮询
+
+`core/poll.ts` 的 `startCatalogPolling({ prefix, refresh, apply })` 是唯一入口：
+
+- `refresh` 只负责「拉一次并交出 id」，`apply` 只负责「让新清单生效」；**变化判定与「变了才 apply」在 core**。
+- 为什么不让每个 agent 自己拼：第一版三个端各自组装轮询，写法一歪就变成「每轮重写一次配置」，dsh 那次尤其危险——写 settings 是有副作用的持久化动作。现在 host 只交两个函数，想歪也歪不到哪去。
+- 用 `setTimeout` 链而不是 `setInterval`：上一次没回来就不排下一轮，慢网关不会把请求堆起来。定时器一律 `unref()`，轮询不该拦住进程退出。
+- 间隔：`<PREFIX>_FACADE_REFRESH_MS` → `FACADE_REFRESH_MS` → `config.json` 的 `refreshMs` → 300000，钳到 ≥ 30000。这条链**故意宽容**：间隔是节奏旋钮，写坏只会得到不合适的节奏，钳回下限没有静默危害；按地址的规矩来会让一次手滑挡住整个模型同步。
+- 变化只在 id 集合有增删时算（重排不算）：用户看到的清单没变，就不该有日志、也不该重新注册。
+
 ## 状态机：拉不到怎么办
 
 所有 agent 必须给出同一个答案，所以这段在 `core/sync.ts`：

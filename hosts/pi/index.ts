@@ -5,6 +5,8 @@
 import os from "node:os";
 
 import { normalizeGatewayInput, writeFacadeConfig } from "../../core/gateway-config.ts";
+import { resolveHostAuthKey, writeAuthKeyAt } from "../../core/auth.ts";
+import { startCatalogPolling, type PollerTimers } from "../../core/poll.ts";
 import type { FetchOptions } from "../../core/gateway.ts";
 import { syncCatalog, type SyncDeps, type SyncState } from "../../core/sync.ts";
 import { toPiModelEntry, toProviderConfig, type PiModelEntry, type PiProviderConfig } from "./catalog.ts";
@@ -50,6 +52,8 @@ export interface PluginState {
   /** 成功后清掉 */
   lastError: string | null;
   registered: boolean;
+  /** 网关密钥；空串表示没有（网关 public 模式）。显示只说来源，从不打印钥匙本身 */
+  apiKey: string;
 }
 
 /** 工厂的注入点，只有测试会用；生产路径全走默认值 */
@@ -59,6 +63,8 @@ export interface PluginOptions {
   fetchOptions?: FetchOptions;
   /** 警告去哪。pi 的扩展没有 console 面板，写 stderr 最容易被看见 */
   warn?: (message: string) => void;
+  /** 轮询器的定时器；测试注入假时钟，生产走真 setTimeout + unref */
+  timers?: PollerTimers;
 }
 
 const PREFIX = "[facade-models]";
@@ -86,12 +92,23 @@ export async function refresh(
     lastError: state.lastError,
     registered: state.registered,
   };
+  // 密钥与地址是同一套分层：环境变量名是 pi 的事实，文件是全机一份、由 core 读写
+  const { key: apiKey } = resolveHostAuthKey({
+    prefix: "PI",
+    env: options.env ?? process.env,
+    home: options.home,
+    warn: options.warn ?? ((message: string) => console.warn(`${PREFIX} ${message}`)),
+  });
   const deps: SyncDeps<PiModelEntry> = {
     // 地址优先级是 pi 的事，core 只拿到排好序的候选
     resolve: () => resolveGateway(options.env ?? process.env, options.home),
     toHost: (specs) => specs.map(toPiModelEntry),
     // 超时预算也是 pi 的：扩展工厂在启动路径上被 await
-    fetchOptions: { ...options.fetchOptions, timeoutMs: options.fetchOptions?.timeoutMs ?? DEFAULT_TIMEOUT_MS },
+    fetchOptions: {
+      ...options.fetchOptions,
+      timeoutMs: options.fetchOptions?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      ...(apiKey === "" ? {} : { apiKey }),
+    },
   };
 
   const outcome = await syncCatalog(sync, deps, signal);
@@ -103,12 +120,13 @@ export async function refresh(
   state.lastRefresh = sync.lastRefresh;
   state.lastError = sync.lastError;
   state.registered = sync.registered;
+  state.apiKey = apiKey;
 
   return outcome.ok ? { ok: true } : { ok: false, cancelled: outcome.cancelled, error: outcome.error };
 }
 
 function configFor(state: PluginState, refreshModels: (context: RefreshContext) => Promise<PiModelEntry[]>) {
-  return { ...toProviderConfig(state.gateway, API_KEY, state.models), refreshModels };
+  return { ...toProviderConfig(state.gateway, state.apiKey === "" ? API_KEY : state.apiKey, state.models), refreshModels };
 }
 
 /** 给 /agentfacade（与别名 /facade-models）用的那几行。英文：用户可见 */
@@ -127,6 +145,7 @@ export function describe(state: PluginState): string[] {
     `Gateway: ${state.gateway} (from ${state.from})`,
     `Last refresh: ${when}`,
   ];
+  lines.push(`API key: ${state.apiKey === "" ? "none (gateway public mode)" : "set"}`);
   if (state.lastError !== null) lines.push(`Last refresh failed: ${state.lastError}`);
   return lines;
 }
@@ -141,6 +160,7 @@ export default async function facadeModels(pi: PiExtensionApi, options: PluginOp
     lastRefresh: null,
     lastError: null,
     registered: false,
+    apiKey: "",
   };
 
   // pi 用返回值整体替换现有模型：失败时交回上一次成功的清单，取消则完全安静
@@ -152,10 +172,14 @@ export default async function facadeModels(pi: PiExtensionApi, options: PluginOp
     return state.models;
   };
 
-  const start = await refresh(state, options);
-  if (start.ok) {
+  /** 唯一注册点：重复挂 provider 只是换一份等价的配置 */
+  const register = (): void => {
     pi.registerProvider(PROVIDER_NAME, configFor(state, refreshModels));
     state.registered = true;
+  };
+  const start = await refresh(state, options);
+  if (start.ok) {
+    register();
   } else if (!start.cancelled) {
     // 不注册：models.json 里那条旧清单（如果有）继续生效，pi 照常能用。
     // 踩的是默认地址时多说一句怎么指别处，否则用户只看到一句 ECONNREFUSED。
@@ -166,6 +190,22 @@ export default async function facadeModels(pi: PiExtensionApi, options: PluginOp
   } else {
     warn(`the first fetch was cancelled before it answered — not registering provider "${PROVIDER_NAME}"`);
   }
+
+  // 5 分钟一轮（PI_FACADE_REFRESH_MS / FACADE_REFRESH_MS / config.json 的 refreshMs 可改）：
+  // 间隔、变化判定、「变了才重新注册」都在 core；这里只交「怎么拉一次」和「怎么生效」。
+  startCatalogPolling({
+    prefix: "PI",
+    initialIds: state.models.map((model) => model.id),
+    log: warn,
+    env: options.env ?? process.env,
+    home: options.home,
+    timers: options.timers,
+    refresh: async () => {
+      const result = await refresh(state, options);
+      return result.ok ? state.models.map((model) => model.id) : null;
+    },
+    apply: () => register(),
+  });
 
   /**
    * connect 的写文件落在 core（writeFacadeConfig）：失败时返回错误而不是抛，
@@ -188,10 +228,7 @@ export default async function facadeModels(pi: PiExtensionApi, options: PluginOp
     }
     // 写完立刻刷新一次。拉不到只报告原因、不回滚文件：换网络是正常操作（docs/design.md）
     const result = await refresh(state, options);
-    if (result.ok) {
-      pi.registerProvider(PROVIDER_NAME, configFor(state, refreshModels));
-      state.registered = true;
-    }
+    if (result.ok) register();
     const lines = [`connect: gateway written to ${written.file}`, ...describe(state)];
     if (!result.ok && !result.cancelled) {
       lines.push(`refresh failed: ${result.error} — the file keeps the new address, retry when the gateway is reachable`);
@@ -213,12 +250,35 @@ export default async function facadeModels(pi: PiExtensionApi, options: PluginOp
       await connect(target, ctx);
       return;
     }
+    if (/^key\b/i.test(trimmed)) {
+      const token = trimmed.replace(/^key\b/i, "").trim();
+      const tell = (text: string): void => {
+        if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(text, "warning");
+        else console.log(`${PREFIX} ${text}`);
+      };
+      if (token === "") {
+        tell("usage: /agentfacade key <token>");
+        return;
+      }
+      const written = writeAuthKeyAt(options.home ?? os.homedir(), token);
+      if (!written.ok) {
+        tell(`key: ${written.error} — nothing written`);
+        return;
+      }
+      const result = await refresh(state, options);
+      if (result.ok) register();
+      // 永不回显 token：写成功就只有 "api key saved" 这一句
+      const lines = ["api key saved", ...describe(state)];
+      if (!result.ok && !result.cancelled) lines.push(`refresh failed: ${result.error}`);
+      const message = lines.join("\n");
+      if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(message, state.registered ? "info" : "warning");
+      else console.log(`${PREFIX} ${message}`);
+      return;
+    }
     if (trimmed.toLowerCase() === "refresh") {
       const result = await refresh(state, options);
       if (result.ok) {
-        // 启动之后调用 registerProvider 立刻生效，不用 /reload
-        pi.registerProvider(PROVIDER_NAME, configFor(state, refreshModels));
-        state.registered = true;
+        register();
       } else if (!result.cancelled) {
         warn(`refresh failed (${result.error})`);
       }

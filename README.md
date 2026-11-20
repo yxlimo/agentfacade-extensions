@@ -52,3 +52,35 @@ dsh plugin --profile <profile> add dsh-agentfacade
 ```
 
 不想有文件就用环境变量，优先级高于上面那份：`PI_FACADE_GATEWAY`、`OPENCODE_FACADE_GATEWAY`、`DSH_FACADE_GATEWAY`，以及三者共用的 `FACADE_GATEWAY`。写错的地址会直接报错，不会悄悄退回默认值。
+
+### 网关要密钥时
+
+不配就不带鉴权（网关 public 模式）。要用密钥，任选一种，前面优先：
+
+```text
+PI_FACADE_API_KEY / OPENCODE_FACADE_API_KEY / DSH_FACADE_API_KEY   # 各自的
+FACADE_API_KEY                                                     # 三者共用
+~/.config/agentfacade/auth.json                                    # 落盘，形状见下
+```
+
+```text
+/agentfacade key <token>     # 写进 auth.json（0600）、立刻生效、不回显 token
+```
+
+文件形状与 pi 自己的 `auth.json` 一致：
+
+```json
+{ "agentfacade": { "type": "api_key", "key": "…" } }
+```
+
+DeepSeek Harness 写进它配置的只有环境变量名（`apiKeyEnv`），密钥本身不进配置文件。
+
+### 模型清单自动同步
+
+启动时拉一次，之后每 5 分钟一次：清单有增删才生效并记一行日志，拉不到就保留上一份。改间隔（下限 30 秒）：
+
+```text
+PI_FACADE_REFRESH_MS / OPENCODE_FACADE_REFRESH_MS / DSH_FACADE_REFRESH_MS
+FACADE_REFRESH_MS
+config.json 里的 { "refreshMs": 600000 }
+```

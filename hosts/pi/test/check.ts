@@ -28,6 +28,7 @@ import {
   type PiProviderConfig,
 } from "../catalog.ts";
 import { fetchModelList, modelsUrl } from "../../../core/gateway.ts";
+import type { PollerTimers } from "../../../core/poll.ts";
 import type { ModelSpec } from "../../../core/types.ts";
 import { resolveGateway } from "../gateway-config.ts";
 import { EXPECTED as EXPECTED_SNAPSHOT } from "../fixtures/expected.ts";
@@ -456,6 +457,8 @@ console.log("真实网络（127.0.0.1 的假网关，真的 fetch）");
 
 interface Captured {
   provider: { name: string; config: PiProviderConfig & { refreshModels?: RefreshModels } } | null;
+  /** 注册次数：轮询「变了才重新注册」要数它，不能只看最后一份配置 */
+  registrations: Array<{ name: string; config: PiProviderConfig & { refreshModels?: RefreshModels } }>;
   command: { name: string; handler: (args: string, ctx: unknown) => Promise<void> } | null;
   /** /agentfacade 与别名 /facade-models 各注册一条；command 保留最后一条，旧用例不用改 */
   commands: Array<{ name: string; handler: (args: string, ctx: unknown) => Promise<void> }>;
@@ -464,10 +467,12 @@ interface Captured {
 function fakePi(): PiExtensionApi & Captured {
   const captured: PiExtensionApi & Captured = {
     provider: null,
+    registrations: [],
     command: null,
     commands: [],
     registerProvider(name, config) {
       captured.provider = { name, config };
+      captured.registrations.push({ name, config });
     },
     registerCommand(name, options) {
       const entry = { name, handler: options.handler as (args: string, ctx: unknown) => Promise<void> };
@@ -769,11 +774,11 @@ console.log("refreshModels 与 /facade-models");
 // ── state 的显示（未注册那一路） ────────────────────────────────────────
 
 {
-  const state = { gateway: "", from: "", models: [], lastRefresh: null, lastError: "boom", registered: false };
+  const state = { gateway: "", from: "", models: [], lastRefresh: null, lastError: "boom", registered: false, apiKey: "" };
   const lines = describe(state).join("\n");
   check("未注册时 describe 说 NOT registered 并给下一步", lines.includes("NOT registered") && lines.includes("/agentfacade refresh"), lines);
 
-  const okState = { gateway: "http://gw.example:6450", from: "config file", models: [toPiModelEntry(spec({ id: "a" }))], lastRefresh: Date.now(), lastError: null, registered: true };
+  const okState = { gateway: "http://gw.example:6450", from: "config file", models: [toPiModelEntry(spec({ id: "a" }))], lastRefresh: Date.now(), lastError: null, registered: true, apiKey: "" };
   check("已注册时 describe 报模型数与网关", describe(okState).join("\n").includes("1 registered"), describe(okState).join("\n"));
 }
 
@@ -781,7 +786,7 @@ console.log("refreshModels 与 /facade-models");
 
 {
   const live = await startFakeUpstream(() => ({ body: LISTED }));
-  const state = { gateway: "", from: "", models: [] as PiModelEntry[], lastRefresh: null as number | null, lastError: "old failure" as string | null, registered: false };
+  const state = { gateway: "", from: "", models: [] as PiModelEntry[], lastRefresh: null as number | null, lastError: "old failure" as string | null, registered: false, apiKey: "" };
   const result = await refresh(state, { env: { PI_FACADE_GATEWAY: live.url }, home: tempHome() });
   check("refresh 成功后清掉 lastError", result.ok && state.lastError === null, JSON.stringify(state.lastError));
   check("refresh 成功后记下时间戳", state.lastRefresh !== null);
@@ -898,6 +903,241 @@ console.log("/agentfacade 与 /agentfacade connect");
   check("connect 不带地址 → 提示用法", seen.join("\n").includes("usage:"), seen.join("\n"));
 }
 
+
+// ── 密钥与轮询：pi 侧新行为 ──────────────────────────────────────────────
+console.log("");
+console.log("密钥与轮询（注塑 fetch / 假时钟，全部离线）");
+
+const MOCK_GATEWAY = "http://pi-gw.example:6450";
+
+function jsonResponse(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+interface CapturedFetch {
+  fetchImpl: typeof fetch;
+  headers: Array<Record<string, string> | undefined>;
+}
+function authFetch(respond: () => Response | Promise<Response>): CapturedFetch {
+  const headers: Array<Record<string, string> | undefined> = [];
+  const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+    headers.push(init?.headers as Record<string, string> | undefined);
+    return respond();
+  }) as unknown as typeof fetch;
+  return { fetchImpl, headers };
+}
+
+interface FakeTimer {
+  handler: () => void;
+  ms: number;
+  unrefHits: number;
+}
+interface FakeClock {
+  timers: PollerTimers;
+  scheduled: FakeTimer[];
+  /** 触发下一轮；tick 是 async，等一轮宏任务让 refresh/apply 与下一次排钟都落定 */
+  fire(): Promise<void>;
+}
+function fakeClock(): FakeClock {
+  const scheduled: FakeTimer[] = [];
+  const pending: Array<{ timer: FakeTimer; handle: { unref(): void } }> = [];
+  const timers: PollerTimers = {
+    set(handler, ms) {
+      const timer: FakeTimer = { handler, ms, unrefHits: 0 };
+      const handle = {
+        unref() {
+          timer.unrefHits++;
+        },
+      };
+      scheduled.push(timer);
+      pending.push({ timer, handle });
+      return handle;
+    },
+    clear(handle) {
+      const index = pending.findIndex((entry) => entry.handle === handle);
+      if (index >= 0) {
+        scheduled.splice(scheduled.indexOf(pending[index].timer), 1);
+        pending.splice(index, 1);
+      }
+    },
+  };
+  return {
+    timers,
+    scheduled,
+    async fire() {
+      const entry = pending.shift();
+      if (!entry) throw new Error("no pending timer");
+      scheduled.splice(scheduled.indexOf(entry.timer), 1);
+      entry.timer.handler();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    },
+  };
+}
+
+function seedAuth(home: string, body: string): void {
+  const dir = path.join(home, ".config", "agentfacade");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "auth.json"), body);
+}
+function runMocked(env: Record<string, string>, home: string, fetchImpl: typeof fetch, extra: Partial<PluginOptions> = {}) {
+  return runFactory(env, home, { fetchOptions: { fetchImpl }, ...extra });
+}
+
+{
+  const token = "sk-pi-env-9f2a";
+  const feed = authFetch(() => jsonResponse(LISTED));
+  const { pi, options } = runMocked({ PI_FACADE_GATEWAY: MOCK_GATEWAY, PI_FACADE_API_KEY: token }, tempHome(), feed.fetchImpl);
+  await facadeModels(pi, options);
+  check("PI_FACADE_API_KEY → provider 配置的 apiKey 逐字等于它", pi.provider?.config.apiKey === token, JSON.stringify(pi.provider?.config.apiKey));
+  check(
+    "环境变量密钥 → 目录请求头逐字是 Bearer <key>",
+    same(feed.headers, [{ accept: "application/json", authorization: `Bearer ${token}` }]),
+    JSON.stringify(feed.headers),
+  );
+}
+
+{
+  const feed = authFetch(() => jsonResponse(LISTED));
+  const { pi, options } = runMocked({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, tempHome(), feed.fetchImpl);
+  await facadeModels(pi, options);
+  check("没有密钥 → provider 配置的 apiKey 是 public", pi.provider?.config.apiKey === "public", JSON.stringify(pi.provider?.config.apiKey));
+  check("没有密钥 → 请求头只有 accept，不带 authorization", same(feed.headers, [{ accept: "application/json" }]), JSON.stringify(feed.headers));
+  const seen: string[] = [];
+  await pi.command!.handler("", { ui: { notify: (t: string) => seen.push(t) } });
+  check("describe 明说没密钥是网关 public 模式", seen.join("\n").includes("API key: none (gateway public mode)"), seen.join("\n"));
+}
+
+{
+  const home = tempHome();
+  seedAuth(home, JSON.stringify({ agentfacade: { type: "api_key", key: "sk-pi-file-4b7e" } }));
+  const feed = authFetch(() => jsonResponse(LISTED));
+  const { pi, options } = runMocked({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, home, feed.fetchImpl);
+  await facadeModels(pi, options);
+  check("只有 auth.json 有密钥 → 注册配置用的是文件里的值", pi.provider?.config.apiKey === "sk-pi-file-4b7e", JSON.stringify(pi.provider?.config.apiKey));
+  check(
+    "文件密钥 → 请求头带 Bearer <file key>",
+    same(feed.headers, [{ accept: "application/json", authorization: "Bearer sk-pi-file-4b7e" }]),
+    JSON.stringify(feed.headers),
+  );
+}
+
+{
+  // 坏文件只报告、不中断：密钥坏了不该连带模型同步一起停
+  const home = tempHome();
+  seedAuth(home, "{ not json");
+  const feed = authFetch(() => jsonResponse(LISTED));
+  const { pi, warnings, options } = runMocked({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, home, feed.fetchImpl);
+  await facadeModels(pi, options);
+  check(
+    "坏 auth.json → 恰好一条警告说明忽略存下的密钥",
+    warnings.length === 1 && warnings[0].includes("ignoring the stored api key"),
+    JSON.stringify(warnings),
+  );
+  check(
+    "坏 auth.json → 仍以 public 注册，模型没少",
+    pi.provider?.config.apiKey === "public" && pi.provider.config.models.length === LISTED.data.length,
+    JSON.stringify({ key: pi.provider?.config.apiKey, models: pi.provider?.config.models.length }),
+  );
+}
+
+{
+  const home = tempHome();
+  const token = "sk-pi-command-6d31";
+  const feed = authFetch(() => jsonResponse(LISTED));
+  const { pi, warnings, options } = runMocked({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, home, feed.fetchImpl);
+  await facadeModels(pi, options);
+  const seen: string[] = [];
+  await pi.command!.handler(`key ${token}`, { ui: { notify: (t: string) => seen.push(t) } });
+  const file = path.join(home, ".config", "agentfacade", "auth.json");
+  const content = fs.readFileSync(file, "utf8");
+  check(
+    "/key 写出的文件内容逐字（形状 + 两格缩进 + 换行）",
+    content === `{\n  "agentfacade": {\n    "type": "api_key",\n    "key": "${token}"\n  }\n}\n`,
+    JSON.stringify(content),
+  );
+  check("/key 写出的文件是 0600（明文密钥）", (fs.statSync(file).mode & 0o777) === 0o600, (fs.statSync(file).mode & 0o777).toString(8));
+  check(
+    "/key 的输出与警告都不含 token",
+    seen.join("\n").includes("api key saved") && seen.join("\n").includes("API key: set") && !seen.join("\n").includes(token) && !warnings.join("\n").includes(token),
+    seen.join("\n"),
+  );
+  check(
+    "/key 写完立刻用新密钥刷新（第二次请求才带 Bearer）",
+    pi.provider?.config.apiKey === token &&
+      same(feed.headers, [{ accept: "application/json" }, { accept: "application/json", authorization: `Bearer ${token}` }]),
+    JSON.stringify(feed.headers),
+  );
+  seen.length = 0;
+  await pi.command!.handler("key   ", { ui: { notify: (t: string) => seen.push(t) } });
+  check(
+    "/key 空 token → 用法提示且不改已存密钥",
+    seen.join("\n").includes("usage: /agentfacade key <token>") && fs.readFileSync(file, "utf8") === content,
+    seen.join("\n"),
+  );
+}
+
+{
+  const clock = fakeClock();
+  const feed = authFetch(() => jsonResponse(LISTED));
+  const { pi, options } = runMocked(
+    { PI_FACADE_GATEWAY: MOCK_GATEWAY, PI_FACADE_REFRESH_MS: "45000", FACADE_REFRESH_MS: "99000" },
+    tempHome(),
+    feed.fetchImpl,
+    { timers: clock.timers },
+  );
+  await facadeModels(pi, options);
+  check(
+    "轮询间隔来自 PI_FACADE_REFRESH_MS（不是共用变量或默认）",
+    clock.scheduled.length === 1 && clock.scheduled[0].ms === 45000,
+    JSON.stringify(clock.scheduled.map((t) => t.ms)),
+  );
+  check("挂钟时调了 unref（轮询不拦进程退出）", clock.scheduled[0]?.unrefHits === 1, JSON.stringify(clock.scheduled));
+}
+
+{
+  let body: unknown = LISTED;
+  const clock = fakeClock();
+  const feed = authFetch(() => jsonResponse(body));
+  const { pi, warnings, options } = runMocked({ PI_FACADE_GATEWAY: MOCK_GATEWAY, PI_FACADE_REFRESH_MS: "45000" }, tempHome(), feed.fetchImpl, {
+    timers: clock.timers,
+  });
+  await facadeModels(pi, options);
+  check("（前置）启动时注册一次", pi.registrations.length === 1, String(pi.registrations.length));
+  await clock.fire();
+  check("清单没变：拉了但不重新注册", feed.headers.length === 2 && pi.registrations.length === 1, JSON.stringify({ fetches: feed.headers.length, registrations: pi.registrations.length }));
+  check("清单没变：仍挂下一轮", clock.scheduled.length === 1 && clock.scheduled[0].ms === 45000, JSON.stringify(clock.scheduled.map((t) => t.ms)));
+  body = { data: LISTED.data.slice(0, 2) };
+  await clock.fire();
+  check("清单变了：重新注册一次", pi.registrations.length === 2, String(pi.registrations.length));
+  check(
+    "重新注册的配置装的是新清单（逐字两条 id）",
+    same(pi.provider?.config.models.map((m) => m.id), LISTED.data.slice(0, 2).map((m) => m.id)),
+    JSON.stringify(pi.provider?.config.models.map((m) => m.id)),
+  );
+  check("变化时有一行日志说明增减", warnings.some((w) => w.includes("model catalog changed")), JSON.stringify(warnings));
+}
+
+{
+  // 轮询失败 = 保留上一份：失败不会把已注册的模型撤掉，也不停摆
+  let reachable = true;
+  const clock = fakeClock();
+  const feed = authFetch(() => {
+    if (!reachable) throw new TypeError("fetch failed");
+    return jsonResponse(LISTED);
+  });
+  const { pi, options } = runMocked({ PI_FACADE_GATEWAY: MOCK_GATEWAY, PI_FACADE_REFRESH_MS: "45000" }, tempHome(), feed.fetchImpl, {
+    timers: clock.timers,
+  });
+  await facadeModels(pi, options);
+  reachable = false;
+  await clock.fire();
+  check(
+    "轮询失败：不重新注册，上一份 provider 原样保留",
+    pi.registrations.length === 1 && pi.provider?.config.models.length === LISTED.data.length,
+    JSON.stringify({ registrations: pi.registrations.length, models: pi.provider?.config.models.length }),
+  );
+  check("轮询失败：下一轮照样挂上", clock.scheduled.length === 1, String(clock.scheduled.length));
+}
 
 console.log("");
 console.log(fail === 0 ? `全部通过（${pass} 条）` : `${fail} 条失败，${pass} 条通过`);

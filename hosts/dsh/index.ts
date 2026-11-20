@@ -3,6 +3,8 @@
 // 拿不到可用的写入 API 就报错说明，**不**降级成写文件。每条分叉都留下痕迹：state.writePath、日志、describe()。
 
 import type { FetchOptions } from "../../core/gateway.ts";
+import { resolveHostAuthKey } from "../../core/auth.ts";
+import { startCatalogPolling, type CatalogPoller, type PollerTimers } from "../../core/poll.ts";
 import { syncCatalog, type SyncDeps, type SyncState } from "../../core/sync.ts";
 import { DEFAULT_API, DEFAULT_API_KEY_ENV, DEFAULT_DISPLAY_NAME, toProviderProfile, type PiAiProviderProfile } from "./provider.ts";
 import { DEFAULT_TIMEOUT_MS, resolveDshGateway } from "./gateway-source.ts";
@@ -53,6 +55,12 @@ export interface DshPluginConfig {
   timeoutMs?: number;
   /** 警告通道；默认 console.warn */
   warn?: (message: string) => void;
+  /** 轮询间隔（毫秒）；不配就按 DSH_FACADE_REFRESH_MS → FACADE_REFRESH_MS → config.json → 5 分钟 */
+  refreshMs?: number;
+  /** 读 auth.json 用的 home（测试注入） */
+  home?: string;
+  /** 轮询器的定时器（测试注入假时钟） */
+  timers?: PollerTimers;
 }
 
 /** 插件的运行时状态。一份插件实例一份；第二次 apply 可以复用（测试与热重载） */
@@ -71,6 +79,8 @@ export interface DshState {
   capabilities: Capabilities | null;
   /** 最近一次的同步报告。cordis 的 apply 不返回它（返回值被当 effect 收集），放这里 */
   report: SyncReport | null;
+  /** 定时轮询器；apply 只挂一次，热重载不会叠出第二个 */
+  poller: CatalogPoller | null;
 }
 
 /** apply 的结果。ok:false 时 error 是给人看的一句话 */
@@ -80,11 +90,17 @@ export type SyncReport =
 
 /** 新状态。测试可以自己造一份传给 apply 复用 */
 export function createState(): DshState {
-  return { ns: null, lastGood: null, gateway: "", from: "", lastRefresh: null, lastError: null, writePath: "", capabilities: null, report: null };
+  return { ns: null, lastGood: null, gateway: "", from: "", lastRefresh: null, lastError: null, writePath: "", capabilities: null, report: null, poller: null };
 }
 
 /** 同步一次的全流程。启动路径上被 await：第一次请求前 provider 必须就位；state 由调用方给 */
-export async function syncNow(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState): Promise<SyncReport> {
+export async function syncNow(
+  ctx: DshPluginContext,
+  config: DshPluginConfig = {},
+  state: DshState,
+  /** `write: false` 只拉清单、不写配置：轮询用这一档，写配置交给「清单真的变了」那一步 */
+  options: { write?: boolean } = {},
+): Promise<SyncReport> {
   const warn = pickWarn(ctx, config);
   const log = (message: string): void => {
     const line = `${PREFIX} ${message}`;
@@ -138,11 +154,20 @@ export async function syncNow(ctx: DshPluginContext, config: DshPluginConfig = {
     registered: false,
   };
 
+  // 密钥只用于拉目录；写进 dsh 配置的那份是环境变量名、不是密钥本身（provider.ts 的校验就是这条）
+  const { key: apiKey } = resolveHostAuthKey({
+    prefix: "DSH",
+    env: config.env,
+    home: config.home,
+    warn,
+  });
   const fetchOptions: FetchOptions = {
     timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}),
     ...(ctx.signal ? { signal: ctx.signal } : {}),
+    ...(apiKey === "" ? {} : { apiKey }),
   };
+
 
   const deps: SyncDeps<PiAiProviderProfile> = {
     resolve: () => resolved,
@@ -177,6 +202,18 @@ export async function syncNow(ctx: DshPluginContext, config: DshPluginConfig = {
   }
 
   const value = outcome.models[0];
+  // 轮询的「只拉不写」走到这里就够：清单已经进 state.lastGood，写配置由 apply 那一步做
+  if (options.write === false) {
+    state.lastError = null;
+    return {
+      ok: true,
+      ns: state.ns,
+      writePath: state.writePath,
+      models: value.models.length,
+      gateway: state.gateway,
+      from: state.from,
+    };
+  }
   const write = await writeProvider({ host: settings, caps, descriptor: picked.descriptor, providerName, value });
   if (!write.ok) {
     state.lastError = write.error ?? "settings write failed";
@@ -199,6 +236,26 @@ export async function syncNow(ctx: DshPluginContext, config: DshPluginConfig = {
  */
 export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState = createState()): Promise<void> {
   state.report = await syncNow(ctx, config, state);
+  // 二次 apply（热重载、测试复用同一份 state）不挂第二个定时器
+  if (state.poller !== null) return;
+  const ids = (): readonly string[] => state.lastGood?.models.map((model) => model.id) ?? [];
+  state.poller = startCatalogPolling({
+    prefix: "DSH",
+    initialIds: ids(),
+    log: pickWarn(ctx, config),
+    env: config.env,
+    home: config.home,
+    refreshMs: config.refreshMs,
+    timers: config.timers,
+    // 只拉不写：清单进 state.lastGood 就够，写配置是「真的变了」那一步的事
+    refresh: async () => {
+      const report = await syncNow(ctx, config, state, { write: false });
+      return report.ok ? ids() : null;
+    },
+    apply: async () => {
+      state.report = await syncNow(ctx, config, state, { write: true });
+    },
+  });
 }
 
 /** 给用户看的那几行，文案是 dsh 的说法；排障时能一眼看出走的是哪条分叉 */

@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 
 import type { FetchOptions } from "../../../core/gateway.ts";
 import type { ModelSpec } from "../../../core/types.ts";
+import type { PollerTimers } from "../../../core/poll.ts";
 import { API_KEY, PROVIDER_ID, PROVIDER_NAME, providerBaseUrl } from "../catalog.ts";
 import plugin, {
   PLUGIN_ID,
@@ -76,16 +77,20 @@ function tempHome(): string {
 }
 
 /** 注入用的假 fetch：记录被请求的地址，回答由 respond 决定 */
+/** 注入用的假 fetch：记录被请求的地址与 init（请求头是 init 的一格，鉴权靠它钉），回答由 respond 决定 */
 function captureFetch(respond: (url: string) => Response | Promise<Response>): {
   impl: typeof fetch;
   calls: string[];
+  inits: (RequestInit | undefined)[];
 } {
   const calls: string[] = [];
-  const impl = (async (input: unknown) => {
+  const inits: (RequestInit | undefined)[] = [];
+  const impl = (async (input: unknown, init?: RequestInit) => {
     calls.push(String(input));
+    inits.push(init);
     return respond(String(input));
   }) as unknown as typeof fetch;
-  return { impl, calls };
+  return { impl, calls, inits };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -125,6 +130,46 @@ function fakeContext(): {
     },
   };
   return { ctx, added, transforms: () => calls };
+}
+
+/**
+ * 假定时器：`set` 只记下挂起的回调与间隔，`fire` 手动触发一轮。
+ *
+ * 轮询器每轮 tick 末尾都会重新挂定时器（除非被 stop），所以「pending 重新出现」
+ * 就是这一轮（含 refresh 与 apply）跑完的信号 —— 比等若干毫秒更确定，也不受真时钟影响。
+ */
+function fakeTimers(): {
+  timers: PollerTimers;
+  /** 触发当前挂起的定时器，等这一轮 tick（含 refresh 与 apply）跑完 */
+  fire: () => Promise<void>;
+  /** 最近一次 set 拿到的间隔 */
+  lastMs: () => number;
+} {
+  let pending: (() => void) | null = null;
+  let lastMs = 0;
+  const timers: PollerTimers = {
+    set(handler, ms) {
+      lastMs = ms;
+      pending = handler;
+      return { unref() {} };
+    },
+    clear() {
+      pending = null;
+    },
+  };
+  const fire = async (): Promise<void> => {
+    const current = pending;
+    pending = null;
+    if (current === null) return;
+    current();
+    // tick 是异步的：等到它末尾重新挂上定时器，就是这轮跑完了
+    const deadline = Date.now() + 2000;
+    while (pending === null) {
+      if (Date.now() > deadline) throw new Error("the poller did not re-arm after firing");
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+  };
+  return { timers, fire, lastMs: () => lastMs };
 }
 
 const GATEWAY = "http://gateway.example:6450";
@@ -682,6 +727,181 @@ console.log("setup：pkg / displayName 选项");
     same(added[0]?.models, ONE_PAYLOAD.models) && added[0]?.info.settings.baseURL === `${GATEWAY}/v1`,
     brief(added[0]),
   );
+}
+
+// ── setup：api key ─────────────────────────────────────────────────────────
+
+console.log("");
+console.log("setup：api key（环境变量 → auth.json → 没有；拉目录也带鉴权）");
+
+{
+  const { impl, inits } = captureFetch(() => jsonResponse(ONE_LISTED));
+  const { added } = await runSetup({
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY, OPENCODE_FACADE_API_KEY: "sk-test-123" },
+    fetchOptions: { fetchImpl: impl },
+  });
+  check(
+    "OPENCODE_FACADE_API_KEY → payload 的 settings.apiKey 等于它",
+    added[0]?.info.settings.apiKey === "sk-test-123",
+    brief(added[0]?.info.settings),
+  );
+  const headers = (inits[0]?.headers ?? {}) as Record<string, string>;
+  check(
+    "有密钥时拉目录带 Authorization: Bearer（拉目录也要能过鉴权）",
+    headers.authorization === "Bearer sk-test-123",
+    JSON.stringify(headers),
+  );
+}
+
+{
+  const { impl, inits } = captureFetch(() => jsonResponse(ONE_LISTED));
+  const { added } = await runSetup({
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY },
+    fetchOptions: { fetchImpl: impl },
+  });
+  check(
+    "不给密钥 → settings.apiKey 是 public（网关 public 模式）",
+    added[0]?.info.settings.apiKey === "public",
+    brief(added[0]?.info.settings),
+  );
+  const headers = (inits[0]?.headers ?? {}) as Record<string, string>;
+  check("不给密钥 → 拉目录不带 authorization（维持原行为）", !("authorization" in headers), JSON.stringify(headers));
+}
+
+{
+  // 只在 auth.json 里给（env 不给）：密钥是全机一份、由 core 读写，文件这一级也要能用上
+  const home = tempHome();
+  fs.mkdirSync(path.join(home, ".config", "agentfacade"), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, ".config", "agentfacade", "auth.json"),
+    JSON.stringify({ agentfacade: { type: "api_key", key: "sk-from-file" } }),
+  );
+  const { impl, inits } = captureFetch(() => jsonResponse(ONE_LISTED));
+  const { added } = await runSetup({
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY },
+    fetchOptions: { fetchImpl: impl },
+    pluginOptions: { home },
+  });
+  check(
+    "只在 auth.json 里给（env 不给）→ payload 也用上了",
+    added[0]?.info.settings.apiKey === "sk-from-file",
+    brief(added[0]?.info.settings),
+  );
+  const headers = (inits[0]?.headers ?? {}) as Record<string, string>;
+  check(
+    "auth.json 里的密钥也带进拉目录的 Authorization",
+    headers.authorization === "Bearer sk-from-file",
+    JSON.stringify(headers),
+  );
+}
+
+// ── setup：轮询 ───────────────────────────────────────────────────────────
+
+console.log("");
+console.log("setup：轮询（间隔取环境变量；清单变了才重新 add）");
+
+{
+  // 间隔：OPENCODE_FACADE_REFRESH_MS 优先，FACADE_REFRESH_MS 是共用的兜底
+  const { timers, lastMs } = fakeTimers();
+  const { impl } = captureFetch(() => jsonResponse(ONE_LISTED));
+  const { ctx } = fakeContext();
+  await setup(ctx, {
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY, OPENCODE_FACADE_REFRESH_MS: "60000", FACADE_REFRESH_MS: "90000" },
+    home: tempHome(),
+    fetchOptions: { fetchImpl: impl },
+    warn: () => {},
+    timers,
+  });
+  check("间隔取 OPENCODE_FACADE_REFRESH_MS（自己的变量赢过共用的）", lastMs() === 60000, String(lastMs()));
+}
+
+{
+  const { timers, lastMs } = fakeTimers();
+  const { impl } = captureFetch(() => jsonResponse(ONE_LISTED));
+  const { ctx } = fakeContext();
+  await setup(ctx, {
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY, FACADE_REFRESH_MS: "90000" },
+    home: tempHome(),
+    fetchOptions: { fetchImpl: impl },
+    warn: () => {},
+    timers,
+  });
+  check("没有自己的间隔变量时取 FACADE_REFRESH_MS", lastMs() === 90000, String(lastMs()));
+}
+
+{
+  // 清单变了：多一条模型 → core 判定变化 → apply 重新 add
+  const { timers, fire } = fakeTimers();
+  let body: unknown = ONE_LISTED;
+  const { impl } = captureFetch(() => jsonResponse(body));
+  const { ctx, added, transforms } = fakeContext();
+  const warnings: string[] = [];
+  await setup(ctx, {
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY },
+    home: tempHome(),
+    fetchOptions: { fetchImpl: impl },
+    warn: (message: string) => warnings.push(message),
+    timers,
+  });
+  check("首次注册一次（add 与 transform 各一次）", added.length === 1 && transforms() === 1, `${added.length}/${transforms()}`);
+
+  body = { object: "list", data: [{ id: "model-01" }, { id: "model-02" }] };
+  await fire();
+  check("清单变了 → editor.add 第二次被调用", added.length === 2, String(added.length));
+  check("第二次 add 的是新的那份（两条模型）", added[1]?.models.length === 2, String(added[1]?.models.length));
+  check("变化记一行日志（core 只在变了的时刻记）", warnings.some((w) => w.includes("model catalog changed")), JSON.stringify(warnings));
+
+  // 连续第二次变化：注入的必须是**最新**那份，不是上一轮缓存的那份
+  body = { object: "list", data: [{ id: "model-01" }, { id: "model-02" }, { id: "model-03" }] };
+  await fire();
+  check(
+    "连续第二次变化 → 注入最新那份（三条模型）",
+    added.length === 3 && added[2]?.models.length === 3,
+    JSON.stringify(added.map((entry) => entry.models.length)),
+  );
+}
+
+{
+  // 清单没变：重排不算变化，id 集合没变就不碰 editor
+  const { timers, fire } = fakeTimers();
+  const { impl } = captureFetch(() => jsonResponse(ONE_LISTED));
+  const { ctx, added, transforms } = fakeContext();
+  await setup(ctx, {
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY },
+    home: tempHome(),
+    fetchOptions: { fetchImpl: impl },
+    warn: () => {},
+    timers,
+  });
+  await fire();
+  await fire();
+  check("清单没变 → 只有首次那一次 add", added.length === 1, String(added.length));
+  check("清单没变 → transform 也只有首次那一次", transforms() === 1, String(transforms()));
+}
+
+{
+  // 轮询拉取失败：保留已注册的清单，不额外 add
+  const { timers, fire } = fakeTimers();
+  let first = true;
+  const { impl } = captureFetch(() => {
+    if (first) {
+      first = false;
+      return jsonResponse(ONE_LISTED);
+    }
+    throw new Error("connect ECONNREFUSED 127.0.0.1:6450");
+  });
+  const { ctx, added, transforms } = fakeContext();
+  await setup(ctx, {
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY },
+    home: tempHome(),
+    fetchOptions: { fetchImpl: impl },
+    warn: () => {},
+    timers,
+  });
+  check("首次注册一次", added.length === 1, String(added.length));
+  await fire();
+  check("轮询拉取失败 → 不额外 editor.add（保留上一次的清单）", added.length === 1, String(added.length));
+  check("轮询拉取失败 → transform 也没有第二次", transforms() === 1, String(transforms()));
 }
 
 // ── 整份清单的快照 ───────────────────────────────────────────────────────

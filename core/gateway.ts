@@ -104,10 +104,11 @@ export interface FetchOptions {
   timeoutMs?: number;
   /** 调用方的取消信号；与超时取先到的一个 */
   signal?: AbortSignal;
+  /** 网关密钥；有就带 `Authorization: Bearer <key>`，没有就不带（public 模式不校验 key，维持原行为） */
+  apiKey?: string;
   /** 注入 fetch，测试靠它制造永不响应、非 JSON 的上游 */
   fetchImpl?: typeof fetch;
 }
-
 /** 拉原始清单。任何失败都只是 error，不抛：调用方常在启动路径上等它 */
 export async function fetchModelList(gateway: string, options: FetchOptions = {}): Promise<ModelListResult> {
   const url = modelsUrl(gateway);
@@ -133,9 +134,12 @@ export async function fetchModelList(gateway: string, options: FetchOptions = {}
       : { ok: false, cancelled: false, error: message };
 
   try {
+    // 密钥有就带、没有就不带：public 模式不校验 key，多带一个假凭据反而让排障多一层疑心
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (options.apiKey) headers.authorization = `Bearer ${options.apiKey}`;
     const response = await run(url, {
       method: "GET",
-      headers: { accept: "application/json" },
+      headers,
       signal: controller.signal,
     });
     if (!response.ok) return fail(`${url} answered HTTP ${response.status}`);

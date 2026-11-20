@@ -19,7 +19,7 @@ export const DEFAULT_GATEWAY = "http://127.0.0.1:6450";
 export const DEFAULT_HTTP_PORT = 6450;
 
 /** 我们自己的配置文件（唯一允许写的文件）与旧名（只读，兼容） */
-const CONFIG_SEGMENTS = [".config", "agentfacade", "config.json"];
+export const CONFIG_SEGMENTS = [".config", "agentfacade", "config.json"];
 const LEGACY_SEGMENTS = [".config", "buddy-helper", "config.json"];
 
 /** 报错与 connect 显示里怎么称呼这两级 */

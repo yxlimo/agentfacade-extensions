@@ -1,9 +1,12 @@
-// opencode 插件（v2 API）：`setup` 里拉一次清单 → `editor.add({ info, models })`，**不写任何文件**。
+// opencode 插件（v2 API）：`setup` 里拉一次清单 → `editor.add({ info, models })`，之后按间隔轮询，
+// 清单真的变了再 add 一次；**不写任何文件**。
 // provider id 独立（`agentfacade`，模型引用写成 `agentfacade/<modelID>`），不与用户已有的 provider 撞名。
 // 拉不到 / 清单为空 / 答的不是 JSON 时一律不注册：整表注册空值等于把用户手上的模型清空。
 
 import type { FetchOptions } from "../../core/gateway.ts";
 import { syncCatalog, type SyncDeps, type SyncState } from "../../core/sync.ts";
+import { resolveHostAuthKey } from "../../core/auth.ts";
+import { startCatalogPolling, type PollerTimers } from "../../core/poll.ts";
 import { API_KEY, PROVIDER_ID } from "./catalog.ts";
 import { DEFAULT_PACKAGE, toV2Payload, type OpencodeV2Payload } from "./v2.ts";
 import { DEFAULT_TIMEOUT_MS, NO_GATEWAY_HINT, resolveGateway } from "./gateway-config.ts";
@@ -31,6 +34,8 @@ export interface OpencodePluginOptions {
   pkg?: string;
   /** provider 的显示名覆盖 */
   displayName?: string;
+  /** 轮询器的定时器（测试注入假时钟） */
+  timers?: PollerTimers;
 }
 
 /** cancelled 与失败分开（前者是调用方自己不要了）；成功时把要注册的东西一起交回来 */
@@ -46,6 +51,15 @@ export async function refresh(
   options: OpencodePluginOptions = {},
   signal?: AbortSignal,
 ): Promise<RefreshResult> {
+  const warn = options.warn ?? ((message: string) => process.stderr.write(`${PREFIX} ${message}\n`));
+  // 密钥：环境变量名是 opencode 的事实（OPENCODE_FACADE_API_KEY → FACADE_API_KEY），文件是全机一份、由 core 读写。
+  // 坏文件只报告、降级成空密钥：密钥坏了不该连带模型同步一起停（core 的约定）。
+  const { key: authKey } = resolveHostAuthKey({
+    prefix: "OPENCODE",
+    env: options.env ?? process.env,
+    home: options.home,
+    warn,
+  });
   const deps: SyncDeps<OpencodeV2Payload> = {
     // 地址优先级是 opencode 的事，core 只拿到排好序的候选
     resolve: () => resolveGateway(options.env ?? process.env, options.home),
@@ -54,7 +68,8 @@ export async function refresh(
     toHost: (specs) => [
       toV2Payload(specs, {
         baseUrl: state.gateway,
-        apiKey: API_KEY,
+        // 空串是「没有密钥」（网关 public 模式），不是「不支持」：用 === 判，不靠真值
+        apiKey: authKey === "" ? API_KEY : authKey,
         pkg: options.pkg ?? DEFAULT_PACKAGE,
         displayName: options.displayName,
       }),
@@ -63,6 +78,8 @@ export async function refresh(
     fetchOptions: {
       ...options.fetchOptions,
       timeoutMs: options.fetchOptions?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      // 拉目录也要能过鉴权：有密钥就带上 Authorization，没有就维持 public 模式的原行为
+      ...(authKey === "" ? {} : { apiKey: authKey }),
     },
   };
 
@@ -88,7 +105,7 @@ export interface OpencodeV2Editor {
 export interface OpencodeV2Context {
   provider: {
     transform(callback: (editor: OpencodeV2Editor) => void): Promise<unknown>;
-    /** v2 的域刷新；本插件不做周期刷新，声明它只是为了让调用方知道它存在 */
+    /** v2 的域刷新；本插件不调它（周期刷新走 core 轮询 + transform 重新 add），声明它只是为了让调用方知道它存在 */
     reload?(): Promise<void>;
   };
 }
@@ -113,6 +130,33 @@ export async function setup(
 
   await ctx.provider.transform((editor) => {
     editor.add(result.payload);
+  });
+
+  // 轮询：间隔解析、变化判定、「变了才重新注册」都在 core；这里只交「怎么拉一次」和「怎么生效」。
+  // apply 用最近一次拉到的 payload（不重新 fetch）：清单没变时 core 根本不调 apply，editor 一次都不碰。
+  let latest: OpencodeV2Payload | null = null;
+  startCatalogPolling({
+    prefix: "OPENCODE",
+    initialIds: result.payload.models.map((model) => model.id),
+    log: warn,
+    env: options.env ?? process.env,
+    home: options.home,
+    timers: options.timers,
+    refresh: async () => {
+      const polled = await refresh(state, options);
+      if (!polled.ok) return null;
+      latest = polled.payload;
+      return polled.payload.models.map((model) => model.id);
+    },
+    apply: async () => {
+      // apply 只在清单真的变了时被 core 调，那时 refresh 必然成功过，latest 一定有值；
+      // 空判只是类型上的防御，不是一条会走到的分支
+      const payload = latest;
+      if (payload === null) return;
+      await ctx.provider.transform((editor) => {
+        editor.add(payload);
+      });
+    },
   });
 }
 

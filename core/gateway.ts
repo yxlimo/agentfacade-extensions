@@ -85,14 +85,19 @@ export function resolveGateway(options: ResolveGatewayOptions): ResolvedGateway 
 /** 锁定报文方言：默认值在网关那边，随手一改就整体错位且不报错 */
 export const MODELS_DIALECT = "openai";
 
-/** 网关的模型清单地址：根路径下的 /v1/models，方言锁在 query 上 */
-export function modelsUrl(gateway: string): string {
-  // 地址自带 query 时用 & 接上：拼出第二个 "?" 会让它之后的参数被网关忽略，方言就静默失效了
+/** 网关根地址 + 路径。地址自带 query 时用 & 接上：拼出第二个 "?" 会让它之后的参数被网关忽略 */
+export function gatewayUrl(gateway: string, path: string, extraQuery = ""): string {
   const cut = gateway.indexOf("?");
   const base = cut === -1 ? gateway : gateway.slice(0, cut);
   const query = cut === -1 ? "" : gateway.slice(cut + 1);
-  const path = `${base}/v1/models`;
-  return query ? `${path}?${query}&dialect=${MODELS_DIALECT}` : `${path}?dialect=${MODELS_DIALECT}`;
+  const joined = [query, extraQuery].filter((part) => part !== "").join("&");
+  const suffix = joined === "" ? "" : `?${joined}`;
+  return `${base}${path}${suffix}`;
+}
+
+/** 网关的模型清单地址：根路径下的 /v1/models，方言锁在 query 上 */
+export function modelsUrl(gateway: string): string {
+  return gatewayUrl(gateway, "/v1/models", `dialect=${MODELS_DIALECT}`);
 }
 
 export type ModelListResult =

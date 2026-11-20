@@ -40,6 +40,7 @@ import {
   writeFacadeConfig,
 } from "../gateway-config.ts";
 import { syncCatalog, type SyncDeps, type SyncState } from "../sync.ts";
+import { probeModels, type ProbeResult } from "../probe.ts";
 import type { HostAdapter, ModelSpec } from "../types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1478,6 +1479,200 @@ console.log("HostAdapter 契约");
   check("register 拿到 provider 与 RegisterContext", same(registered, { registered: true }), JSON.stringify(registered));
 }
 
+// ── 探活：分类、并发、容错 ───────────────────────────────────────────────────
+console.log("");
+console.log("探活（注入 fetch：分类、并发、容错）");
+
+const PROBE_GATEWAY = "http://gw.example:6450";
+
+function probeResponse(body: unknown, status = 200): Response {
+  return new Response(typeof body === "string" ? body : JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** 按请求体里的 model 回答：探活是一模型一请求，假 fetch 必须看得见是哪一条 */
+function probeFetch(respond: (model: string) => Response | Promise<Response>) {
+  const calls: Array<{ url: string; method: string; headers: Record<string, string>; body: unknown }> = [];
+  const impl = (async (input: unknown, init?: RequestInit) => {
+    const body: unknown = JSON.parse(String(init?.body ?? "{}"));
+    calls.push({
+      url: String(input),
+      method: init?.method ?? "",
+      headers: init?.headers as Record<string, string>,
+      body,
+    });
+    const model = (body as Record<string, unknown>).model;
+    return respond(typeof model === "string" ? model : "");
+  }) as unknown as typeof fetch;
+  return { impl, calls };
+}
+
+/** 延迟是实测值，逐字快照时只去掉这一格；其余字段一格不漏 */
+function withoutLatency(results: readonly ProbeResult[]): unknown[] {
+  return results.map(({ latencyMs, ...rest }) => rest);
+}
+
+{
+  const feed = probeFetch(() => probeResponse({ id: "chatcmpl-1" }));
+  const results = await probeModels({
+    gateway: PROBE_GATEWAY,
+    models: ["m1"],
+    apiKey: "sk-probe-secret",
+    fetchImpl: feed.impl,
+  });
+  check(
+    "探活请求逐字：chat 路径 / POST / 最小体 / Bearer 头",
+    same(feed.calls, [
+      {
+        url: "http://gw.example:6450/v1/chat/completions",
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json", authorization: "Bearer sk-probe-secret" },
+        body: { model: "m1", messages: [{ role: "user", content: "hi" }], max_tokens: 1 },
+      },
+    ]),
+    JSON.stringify(feed.calls),
+  );
+  check(
+    "200 → ok：HTTP 码保留、成功无 detail",
+    same(withoutLatency(results), [{ model: "m1", status: "ok", httpStatus: 200 }]),
+    JSON.stringify(withoutLatency(results)),
+  );
+  check("延迟是实测的非负毫秒数", typeof results[0].latencyMs === "number" && results[0].latencyMs >= 0, JSON.stringify(results[0]));
+
+  const open = probeFetch(() => probeResponse({}));
+  await probeModels({ gateway: PROBE_GATEWAY, models: ["m1"], fetchImpl: open.impl });
+  check(
+    "没有密钥 → 不带 authorization（public 模式）",
+    same(open.calls[0].headers, { accept: "application/json", "content-type": "application/json" }),
+    JSON.stringify(open.calls[0].headers),
+  );
+}
+
+{
+  const feed = probeFetch(() => probeResponse({}));
+  await probeModels({ gateway: "http://gw.example:6450?token=abc", models: ["m1"], fetchImpl: feed.impl });
+  check(
+    "探活地址复用统一拼接：自带 query 时用 & 接，不出现第二个 ?",
+    feed.calls[0].url === "http://gw.example:6450/v1/chat/completions?token=abc",
+    feed.calls[0].url,
+  );
+}
+
+{
+  const cases: Array<{ name: string; status: number; body: unknown; expected: Record<string, unknown> }> = [
+    { name: "401 → auth", status: 401, body: { error: { message: "invalid api key" } }, expected: { status: "auth", httpStatus: 401, detail: "invalid api key" } },
+    { name: "403 → auth", status: 403, body: { error: { message: "forbidden model" } }, expected: { status: "auth", httpStatus: 403, detail: "forbidden model" } },
+    { name: "402 + exceed quota limit → quota", status: 402, body: { error: { message: "exceed quota limit for coder-a" } }, expected: { status: "quota", httpStatus: 402, detail: "exceed quota limit for coder-a" } },
+    { name: "402 + insufficient_quota → quota", status: 402, body: { error: { message: "insufficient_quota" } }, expected: { status: "quota", httpStatus: 402, detail: "insufficient_quota" } },
+    { name: "402 没有额度关键词 → unclassified（不猜）", status: 402, body: { error: { message: "payment required" } }, expected: { status: "unclassified", httpStatus: 402, detail: "payment required" } },
+    { name: "其它 2xx（201）→ unclassified，仍然给 detail（只有 200 算 ok）", status: 201, body: "", expected: { status: "unclassified", httpStatus: 201, detail: "HTTP 201" } },
+    { name: "502 包着上游 400 → upstream，detail 留上游原文", status: 502, body: { error: { message: "Bad Gateway", upstream: { status: 400, body: "model coder-a is not allowed in this plan" } } }, expected: { status: "upstream", httpStatus: 502, detail: "Bad Gateway | model coder-a is not allowed in this plan" } },
+    { name: "502 包着 insufficient_quota → upstream", status: 502, body: { error: { message: "Bad Gateway", upstream: { body: "insufficient_quota from provider" } } }, expected: { status: "upstream", httpStatus: 502, detail: "Bad Gateway | insufficient_quota from provider" } },
+    { name: "502 没有上游线索 → unclassified（不把 502 一律当上游）", status: 502, body: { error: { message: "Bad Gateway" } }, expected: { status: "unclassified", httpStatus: 502, detail: "Bad Gateway" } },
+    { name: "其它 500 → unclassified，detail 取 error.message", status: 500, body: { error: { message: "internal boom" } }, expected: { status: "unclassified", httpStatus: 500, detail: "internal boom" } },
+  ];
+  for (const item of cases) {
+    const feed = probeFetch(() => probeResponse(item.body, item.status));
+    const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["m1"], fetchImpl: feed.impl });
+    check(item.name, same(withoutLatency(results), [{ model: "m1", ...item.expected }]), JSON.stringify(withoutLatency(results)));
+  }
+}
+
+{
+  const feed = probeFetch((model) => {
+    if (model === "html") return probeResponse("<html>nope</html>", 503);
+    if (model === "empty") return probeResponse("", 500);
+    return probeResponse({ error: { message: "x".repeat(2000) } }, 500);
+  });
+  const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["html", "empty", "huge"], fetchImpl: feed.impl });
+  check(
+    "非 JSON / 空体 / 超长体都不抛，逐字结果与截断长度",
+    same(withoutLatency(results), [
+      { model: "html", status: "unclassified", httpStatus: 503, detail: "<html>nope</html>" },
+      { model: "empty", status: "unclassified", httpStatus: 500, detail: "HTTP 500" },
+      { model: "huge", status: "unclassified", httpStatus: 500, detail: `${"x".repeat(399)}…` },
+    ]),
+    JSON.stringify(withoutLatency(results)),
+  );
+}
+
+{
+  const feed = probeFetch(async (model) => {
+    if (model === "slow") throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    if (model === "dead") {
+      throw Object.assign(new Error("fetch failed"), {
+        cause: { code: "ECONNREFUSED", message: "connect ECONNREFUSED 127.0.0.1:6450" },
+      });
+    }
+    if (model === "quota") return probeResponse({ error: { message: "insufficient_quota" } }, 402);
+    return probeResponse({});
+  });
+  const results = await probeModels({
+    gateway: PROBE_GATEWAY,
+    models: ["ok", "slow", "ok", "dead", "quota"],
+    fetchImpl: feed.impl,
+  });
+  check("模型去重、输出顺序与输入一致", same(results.map((r) => r.model), ["ok", "slow", "dead", "quota"]), JSON.stringify(results.map((r) => r.model)));
+  check(
+    "一条超时/连接失败不影响其它条，逐字结果",
+    same(withoutLatency(results), [
+      { model: "ok", status: "ok", httpStatus: 200 },
+      { model: "slow", status: "timeout", detail: "aborted" },
+      { model: "dead", status: "unreachable", detail: "fetch failed: connect ECONNREFUSED 127.0.0.1:6450" },
+      { model: "quota", status: "quota", httpStatus: 402, detail: "insufficient_quota" },
+    ]),
+    JSON.stringify(withoutLatency(results)),
+  );
+  check("去重后只发 4 个请求", feed.calls.length === 4, String(feed.calls.length));
+}
+
+{
+  const hang = (async (input: unknown, init?: RequestInit) => {
+    const body: unknown = JSON.parse(String(init?.body ?? "{}"));
+    if ((body as Record<string, unknown>).model !== "hang") return probeResponse({});
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    });
+  }) as unknown as typeof fetch;
+  const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["hang", "fine"], timeoutMs: 15, fetchImpl: hang });
+  check(
+    "自己的超时计时器生效：挂住的模型 timeout，另一条照常 ok",
+    same(withoutLatency(results), [
+      { model: "hang", status: "timeout", detail: "timed out after 15ms" },
+      { model: "fine", status: "ok", httpStatus: 200 },
+    ]),
+    JSON.stringify(withoutLatency(results)),
+  );
+}
+
+{
+  let inFlight = 0;
+  let peak = 0;
+  const impl = (async () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight--;
+    return probeResponse({});
+  }) as unknown as typeof fetch;
+  const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["a", "b", "c", "d", "e"], concurrency: 2, fetchImpl: impl });
+  check("并发上限：5 条模型、concurrency=2 时在途峰值恰好 2", peak === 2, String(peak));
+  check("并发下输出顺序仍与输入一致", same(results.map((r) => r.model), ["a", "b", "c", "d", "e"]), JSON.stringify(results.map((r) => r.model)));
+}
+
+{
+  const token = "sk-echo-me-4b7e";
+  const feed = probeFetch(() => probeResponse({ error: { message: `bad key ${token} accepted` } }, 401));
+  const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["m1"], apiKey: token, fetchImpl: feed.impl });
+  check(
+    "错误体回显密钥时抹成 ***（排障输出不泄露）",
+    same(withoutLatency(results), [{ model: "m1", status: "auth", httpStatus: 401, detail: "bad key *** accepted" }]),
+    JSON.stringify(withoutLatency(results)),
+  );
+}
+
 // ── 归属规则：core 里不许出现 agent 词汇 ─────────────────────────────────────
 
 console.log("");
@@ -1500,7 +1695,7 @@ console.log("core 的归属规则（禁用词扫描）");
   // capabilities.tools），catalog.ts 必须读它；但它出现在别的 core 文件里、或以 `capabilities:` 的
   // key 位置出现，就说明 agent 的形状漏进了契约。下面那条 key 位置断言是这条口子的补偿。
   const PAYLOAD_ONLY = "capabilities";
-  const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts", "gateway-config.ts", "auth.ts", "poll.ts"];
+  const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts", "gateway-config.ts", "auth.ts", "poll.ts", "probe.ts"];
   // 「agentfacade」是工具链自己的目录名/项名：gateway-config.ts 里只许出现在 config.json 路径上，
   // auth.ts 整份文件管的就是 auth.json（路径、项名、报错文案全是它）。
   // 其它文件出现一次就算越界。
@@ -1524,10 +1719,10 @@ console.log("core 的归属规则（禁用词扫描）");
     if (file !== "catalog.ts" && text.includes(PAYLOAD_ONLY)) hits.push(`${file}: ${PAYLOAD_ONLY}`);
     if (/(^|[\s,{])capabilities\s*:/m.test(text)) keyHits.push(file);
   }
-  check("core 的七个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
+  check("core 的八个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
   check("capabilities 只在读报文的位置，没变成我们自己的字段名", keyHits.length === 0, JSON.stringify(keyHits));
   check(
-    "扫描确实读到了七个源文件（不然上一行永远绿）",
+    "扫描确实读到了八个源文件（不然上一行永远绿）",
     files.every((file) => fs.existsSync(path.join(CORE_DIR, file))),
     JSON.stringify(files),
   );

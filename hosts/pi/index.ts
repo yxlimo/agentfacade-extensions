@@ -8,9 +8,11 @@ import { normalizeGatewayInput, writeFacadeConfig } from "../../core/gateway-con
 import { resolveHostAuthKey, writeAuthKeyAt } from "../../core/auth.ts";
 import { startCatalogPolling, type PollerTimers } from "../../core/poll.ts";
 import type { FetchOptions } from "../../core/gateway.ts";
+import type { ProbeOptions } from "../../core/probe.ts";
 import { syncCatalog, type SyncDeps, type SyncState } from "../../core/sync.ts";
 import { toPiModelEntry, toProviderConfig, type PiModelEntry, type PiProviderConfig } from "./catalog.ts";
 import { DEFAULT_TIMEOUT_MS, NO_GATEWAY_HINT, resolveGateway } from "./gateway-config.ts";
+import { runProbe } from "./probe.ts";
 
 /** provider 名：独立名字，不与 models.json 里可能存在的条目撞名 */
 export const PROVIDER_NAME = "agentfacade";
@@ -65,6 +67,8 @@ export interface PluginOptions {
   warn?: (message: string) => void;
   /** 轮询器的定时器；测试注入假时钟，生产走真 setTimeout + unref */
   timers?: PollerTimers;
+  /** 探活的注入点；超时预算与目录拉取的不是一回事（探活默认 15 秒） */
+  probe?: Pick<ProbeOptions, "fetchImpl" | "timeoutMs" | "concurrency">;
 }
 
 const PREFIX = "[facade-models]";
@@ -275,6 +279,13 @@ export default async function facadeModels(pi: PiExtensionApi, options: PluginOp
       else console.log(`${PREFIX} ${message}`);
       return;
     }
+    if (/^probe\b/i.test(trimmed)) {
+      // 命令只接线：runProbe 调 core 并把表排好，这里只负责送出去
+      const text = (await runProbe(trimmed.replace(/^probe\b/i, ""), state, options)).join("\n");
+      if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(text, "info");
+      else console.log(`${PREFIX} ${text}`);
+      return;
+    }
     if (trimmed.toLowerCase() === "refresh") {
       const result = await refresh(state, options);
       if (result.ok) {
@@ -289,7 +300,7 @@ export default async function facadeModels(pi: PiExtensionApi, options: PluginOp
   };
 
   pi.registerCommand("agentfacade", {
-    description: "Show the AgentFacade gateway model catalog; /agentfacade connect <address> writes ~/.config/agentfacade/config.json and re-fetches; refresh re-fetches",
+    description: "Show the AgentFacade gateway model catalog; /agentfacade connect <address> writes ~/.config/agentfacade/config.json and re-fetches; refresh re-fetches; probe [models...] checks each model (reference only, not a gate)",
     handler: handleCommand,
   });
   // 别名：老名字保留

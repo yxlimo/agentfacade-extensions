@@ -51,7 +51,8 @@ export async function runProbe(
   invocation: ProbeInvocation = {},
 ): Promise<string[]> {
   const names = args.trim().split(/\s+/).filter((part) => part !== "");
-  const models = names.length > 0 ? names : state.models.map((model) => model.id);
+  // core 探活会去重，进度里的 N 用同一口径：别报「探活 3 条」却只发出 2 条请求
+  const models = [...new Set(names.length > 0 ? names : state.models.map((model) => model.id))];
   if (models.length === 0) return ["没有模型可探：先 /agentfacade refresh，或给出模型名"];
   const chosen = target(options);
   if ("error" in chosen) return [chosen.error];

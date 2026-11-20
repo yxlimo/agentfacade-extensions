@@ -1211,6 +1211,7 @@ function probeLines(text: string): string[] {
     JSON.stringify(feed.calls.map((call) => call.body)),
   );
   check("表格行数跟着结果走（两条 + 表头 + 提示）", probeLines(seen.join("\n")).length === 5, JSON.stringify(probeLines(seen.join("\n"))));
+  check("进度提示的模型数按去重后算（3 个名字只报 2 条）", probeLines(seen.join("\n"))[0] === "探活 2 条模型，最坏约 15 秒", JSON.stringify(probeLines(seen.join("\n"))[0]));
 }
 
 {

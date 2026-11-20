@@ -137,10 +137,9 @@ function quotaWords(body: BodyInfo): boolean {
   return text.includes("exceed quota limit") || text.includes("quota exceeded") || text.includes("insufficient_quota");
 }
 
-/** 502 常被网关用来包上游的 400/403：错误体里找得到上游状态或它的原文才算 upstream */
+/** 502 常被网关用来包上游的 400/403：错误体里找得到上游状态或它的原文才算 upstream（额度词已在 classify 先行拦走） */
 function wrappedUpstream(body: BodyInfo): boolean {
   const text = allText(body);
-  if (text.includes("insufficient_quota")) return true;
   // 单独的 code/status 太通用（网关自己的 code:403 不算上游证据）：必须有 upstream/provider 同现才认
   if (/\b(?:upstream|provider)\b/.test(text)) {
     if (/(?:upstream|provider)[^0-9]{0,24}\b(?:400|403)\b/.test(text)) return true;
@@ -153,12 +152,14 @@ function wrappedUpstream(body: BodyInfo): boolean {
 function classify(status: number, body: BodyInfo): ProbeStatus {
   if (status === 200) return "ok";
   if (status === 401 || status === 403) return "auth";
-  // HTTP 402 就是 Payment Required，不看正文：词表只作其它状态的辅助，且让 401/403/404/429 与 502 的上游判定优先
+  // HTTP 402 就是 Payment Required，不看正文：词表只作其它状态的辅助，且让 401/403/404/429 的状态码判定先于词表
   if (status === 402) return "quota";
   if (status === 404) return "missing";
   if (status === 429) return "throttled";
-  if (status === 502 && wrappedUpstream(body)) return "upstream";
+  // 额度耗尽对应充值/换号、重试无用，上游故障或请求被上游拒绝才单列 upstream：两种状态的动作不同。
+  // 网关常把额度错误包进 502，所以额度词先于 502 的上游标记判定——否则同一个额度语义会因用词落进两个状态
   if (quotaWords(body)) return "quota";
+  if (status === 502 && wrappedUpstream(body)) return "upstream";
   return "unclassified";
 }
 

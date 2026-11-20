@@ -1593,7 +1593,8 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
     { name: "400 命中额度词 → quota（词表只作其它状态的辅助）", status: 400, body: { error: { message: "insufficient_quota" } }, expected: { status: "quota", httpStatus: 400, detail: "insufficient_quota" } },
     { name: "其它 2xx（201）→ unclassified，仍然给 detail（只有 200 算 ok）", status: 201, body: "", expected: { status: "unclassified", httpStatus: 201, detail: "HTTP 201" } },
     { name: "502 包着上游 400 → upstream，detail 留上游原文", status: 502, body: { error: { message: "Bad Gateway", upstream: { status: 400, body: "model coder-a is not allowed in this plan" } } }, expected: { status: "upstream", httpStatus: 502, detail: "Bad Gateway | model coder-a is not allowed in this plan" } },
-    { name: "502 包着 insufficient_quota → upstream", status: 502, body: { error: { message: "Bad Gateway", upstream: { body: "insufficient_quota from provider" } } }, expected: { status: "upstream", httpStatus: 502, detail: "Bad Gateway | insufficient_quota from provider" } },
+    { name: "502 包着 insufficient_quota → quota（额度词优先于上游标记，detail 仍留上游原文）", status: 502, body: { error: { message: "Bad Gateway", upstream: { body: "insufficient_quota from provider" } } }, expected: { status: "quota", httpStatus: 502, detail: "Bad Gateway | insufficient_quota from provider" } },
+    { name: "502 同时有上游 400 与额度词 → quota（额度词优先于上游标记），detail 仍留上游原文", status: 502, body: { error: { message: "Bad Gateway", upstream: { status: 400, body: "provider rejected: quota exceeded" } } }, expected: { status: "quota", httpStatus: 502, detail: "Bad Gateway | provider rejected: quota exceeded" } },
     { name: "502 没有上游线索 → unclassified（不把 502 一律当上游）", status: 502, body: { error: { message: "Bad Gateway" } }, expected: { status: "unclassified", httpStatus: 502, detail: "Bad Gateway" } },
     { name: "502 只有自己的 code:403 → unclassified（code 不算上游证据）", status: 502, body: { error: { message: "Bad Gateway", code: 403 } }, expected: { status: "unclassified", httpStatus: 502, detail: "Bad Gateway" } },
     { name: "502 + 字符串型 upstream 原文 → upstream，detail 留住原文", status: 502, body: { error: { message: "Bad Gateway", upstream: "upstream code 403: plan rejected" } }, expected: { status: "upstream", httpStatus: 502, detail: "Bad Gateway | upstream code 403: plan rejected" } },
@@ -1668,7 +1669,7 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
 }
 
 {
-  const hang = (async (input: unknown, init?: RequestInit) => {
+  const hang = (async (_input: unknown, init?: RequestInit) => {
     const body: unknown = JSON.parse(String(init?.body ?? "{}"));
     if ((body as Record<string, unknown>).model !== "hang") return probeResponse({});
     return new Promise((_resolve, reject) => {

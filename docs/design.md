@@ -137,15 +137,16 @@ interface ModelSpec {
 | --- | --- | --- |
 | `ok` | 200 | 用这条 |
 | `auth` | 401 / 403 | 查密钥 / 权限 |
-| `quota` | **402 一律**（HTTP 语义就是 Payment Required，不看正文）；其它状态命中额度词只作辅助 | 换账号或充值 |
+| `quota` | **402 一律**（HTTP 语义就是 Payment Required，不看正文）；其它状态（含 502）错误体命中额度词（`exceed quota limit` / `quota exceeded` / `insufficient_quota`）也算——额度耗尽该充值/换号、重试无用，所以 502 里额度词优先于上游标记 | 换账号或充值 |
 | `missing` | 404 | 改模型 id |
 | `throttled` | 429 | 等一会再来 |
-| `upstream` | 502 且错误体含上游 400/403；`code`/`status` 必须与 `upstream`/`provider` 同现，避免把网关自己的 `code:403` 误判 | 看 `detail` 的上游原文 |
+| `upstream` | 502 且错误体没有额度词、但能认出上游 400/403；`code`/`status` 必须与 `upstream`/`provider` 同现才认（见「已知缺口」） | 看 `detail` 的上游原文 |
 | `timeout` | fetch 抛 AbortError 或本地计时器到点 | 重试或调高预算 |
 | `unreachable` | 连接类错误 | 查网关地址 |
 | `cancelled` | 调用方的 signal 先到（不是超时，也不是模型的错） | 重新发起 |
 | `unclassified` | 以上都不认 | 读 `detail` 原文 |
 
+**已知缺口**：`upstream` 的判定是「同现」而非精确关联——正文里 `code`/`status` 与 `upstream`/`provider` 同时出现就算，因此网关自己的 `code:403` 若恰好与正文中某处 `provider` 同现，也可能被当成上游标记。detail 保留原文，用户可据以纠正；这只影响一条参考标签，不影响请求本身。
 `detail` 取错误体摘要并截断；错误体先截到 4096 字符再压平/解析——分类只要开头那点线索，几 MB 的正文不该被复制三份。`upstream` 是纯字符串时也要收进摘要。非 JSON、空体、超长体都不能抛；回显的密钥抹成 `***`。`concurrency`/`timeoutMs` 非正、NaN 一律钳回默认值：`concurrency: 0` 钳回默认而不是 1（1 会把全量探活拉成串行），绝不留零 worker 静默返回空表。最坏耗时由 `probePlan` 算出，宿主只把它印成「探活 N 条模型，最坏约 M 秒」，在 await 之前发出；能拿到 ctx 的取消信号就透传给每条 fetch，拿不到就如实不声称支持。URL 与目录一样锁 `dialect=openai`，不依赖网关默认值。
 
 为什么不做成派单闸门：探活测的是一次最小请求，真实派单还带着会话头、思考档位、长上下文。实测探活 502 的模型照样跑得动，所以输出末尾固定一句「探活结果仅供参考，不是派单闸门」，且这条判断不写在 agent 的命令里。

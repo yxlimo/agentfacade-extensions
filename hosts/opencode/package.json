@@ -1,6 +1,11 @@
 {
   "name": "opencode-agentfacade",
   "version": "0.1.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yxlimo/agentfacade-extensions.git",
+    "directory": "hosts/opencode"
+  },
   "type": "module",
   "description": "Let OpenCode load its model catalog from an AgentFacade gateway instead of maintaining provider entries by hand",
   "main": "./index.ts",

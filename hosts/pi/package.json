@@ -1,6 +1,11 @@
 {
   "name": "pi-agentfacade",
   "version": "0.1.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yxlimo/agentfacade-extensions.git",
+    "directory": "hosts/pi"
+  },
   "type": "module",
   "description": "Let pi load its model catalog from an AgentFacade gateway at startup instead of editing models.json by hand",
   "pi": {

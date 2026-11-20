@@ -1,6 +1,11 @@
 {
   "name": "dsh-agentfacade",
   "version": "0.1.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yxlimo/agentfacade-extensions.git",
+    "directory": "hosts/dsh"
+  },
   "type": "module",
   "description": "Let DeepSeek Harness load its model catalog from an AgentFacade gateway through its own settings API",
   "main": "./index.ts",

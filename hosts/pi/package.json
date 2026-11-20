@@ -1,6 +1,6 @@
 {
   "name": "pi-agentfacade",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Let pi load its model catalog from an AgentFacade gateway at startup instead of editing models.json by hand",
   "pi": {

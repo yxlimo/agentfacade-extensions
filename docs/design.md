@@ -131,7 +131,22 @@ interface ModelSpec {
 
 `core/probe.ts` 按模型并发发一条最小 chat 请求（`max_tokens: 1`），去重、并发上限、超时、分类都在 core；host 只负责取模型名、调一次、把表打印出来。OpenCode 与 dsh 本轮不接线，但可以直接复用同一份 core，不需要各抄一份。
 
-分类只认实测过的几种语义：200 `ok`；401/403 `auth`；402 且错误体含额度关键词 `quota`；502 且能看到上游 400/403 或被包的额度关键词 `upstream`（`detail` 留上游原文摘要）；fetch 抛 AbortError 或本地计时器到点 `timeout`；连接类错误 `unreachable`；其余 `unclassified`。**502 不一律当上游、402 不一律当额度**：认不出就留原文，不替网关下结论。错误体解析容错——非 JSON、空体、超长体都不能抛；回显的密钥抹成 `***`。
+状态与处置都在 core 判定，host 只打印状态名：
+
+| 状态 | 触发 | 用户的下一步 |
+| --- | --- | --- |
+| `ok` | 200 | 用这条 |
+| `auth` | 401 / 403 | 查密钥 / 权限 |
+| `quota` | **402 一律**（HTTP 语义就是 Payment Required，不看正文）；其它状态命中额度词只作辅助 | 换账号或充值 |
+| `missing` | 404 | 改模型 id |
+| `throttled` | 429 | 等一会再来 |
+| `upstream` | 502 且错误体含上游 400/403；`code`/`status` 必须与 `upstream`/`provider` 同现，避免把网关自己的 `code:403` 误判 | 看 `detail` 的上游原文 |
+| `timeout` | fetch 抛 AbortError 或本地计时器到点 | 重试或调高预算 |
+| `unreachable` | 连接类错误 | 查网关地址 |
+| `cancelled` | 调用方的 signal 先到（不是超时，也不是模型的错） | 重新发起 |
+| `unclassified` | 以上都不认 | 读 `detail` 原文 |
+
+`detail` 取错误体摘要并截断；错误体先截到 4096 字符再压平/解析——分类只要开头那点线索，几 MB 的正文不该被复制三份。`upstream` 是纯字符串时也要收进摘要。非 JSON、空体、超长体都不能抛；回显的密钥抹成 `***`。`concurrency`/`timeoutMs` 非正、NaN 一律钳回默认值：`concurrency: 0` 钳回默认而不是 1（1 会把全量探活拉成串行），绝不留零 worker 静默返回空表。最坏耗时由 `probePlan` 算出，宿主只把它印成「探活 N 条模型，最坏约 M 秒」，在 await 之前发出；能拿到 ctx 的取消信号就透传给每条 fetch，拿不到就如实不声称支持。URL 与目录一样锁 `dialect=openai`，不依赖网关默认值。
 
 为什么不做成派单闸门：探活测的是一次最小请求，真实派单还带着会话头、思考档位、长上下文。实测探活 502 的模型照样跑得动，所以输出末尾固定一句「探活结果仅供参考，不是派单闸门」，且这条判断不写在 agent 的命令里。
 

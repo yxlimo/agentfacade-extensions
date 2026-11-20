@@ -1183,6 +1183,7 @@ function probeLines(text: string): string[] {
   check(
     "探活表逐字：四列 + 失败原因 + 末尾提示",
     same(probeLines(seen.join("\n")), [
+      "探活 2 条模型，最坏约 15 秒",
       "模型 | 状态 | HTTP | 延迟",
       "coder-a | ok | 200 | Xms",
       "coder-b | auth | 401 | Xms",
@@ -1209,7 +1210,7 @@ function probeLines(text: string): string[] {
     same(feed.calls.map((call) => (call.body as { model: string }).model), ["coder-z", "coder-a"]),
     JSON.stringify(feed.calls.map((call) => call.body)),
   );
-  check("表格行数跟着结果走（两条 + 表头 + 提示）", probeLines(seen.join("\n")).length === 4, JSON.stringify(probeLines(seen.join("\n"))));
+  check("表格行数跟着结果走（两条 + 表头 + 提示）", probeLines(seen.join("\n")).length === 5, JSON.stringify(probeLines(seen.join("\n"))));
 }
 
 {
@@ -1226,7 +1227,7 @@ function probeLines(text: string): string[] {
   const seen: string[] = [];
   await pi.command!.handler("probe coder-a coder-b", { ui: { notify: (text: string) => seen.push(text) } });
   const lines = probeLines(seen.join("\n"));
-  check("一条模型超时不中断整张表", same(lines.slice(0, 3), ["模型 | 状态 | HTTP | 延迟", "coder-a | timeout | - | Xms", "coder-b | ok | 200 | Xms"]), JSON.stringify(lines));
+  check("一条模型超时不中断整张表", same(lines.slice(1, 4), ["模型 | 状态 | HTTP | 延迟", "coder-a | timeout | - | Xms", "coder-b | ok | 200 | Xms"]), JSON.stringify(lines));
   check("失败行的原因也打印出来，提示仍在末尾", lines.includes("coder-a: aborted") && lines.at(-1) === PROBE_WARNING, JSON.stringify(lines));
 }
 
@@ -1258,6 +1259,56 @@ function probeLines(text: string): string[] {
   await pi.command!.handler("probe", { ui: { notify: (text: string) => seen.push(text) } });
   check("没有已注册模型时提示先 refresh 或给模型名", seen.join("\n").includes("先 /agentfacade refresh"), seen.join("\n"));
   check("没有已注册模型时不发探活请求", feed.calls.length === 0, String(feed.calls.length));
+}
+
+{
+  const catalog = authFetch(() => jsonResponse(PROBE_CATALOG));
+  const seen: string[] = [];
+  let atFirstFetch: string[] = [];
+  const feed = probeFeed(() => {
+    atFirstFetch = [...seen];
+    return probeReply({});
+  });
+  const { pi, options } = runFactory({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, tempHome(), {
+    fetchOptions: { fetchImpl: catalog.fetchImpl },
+    probe: { fetchImpl: feed.impl },
+  });
+  await facadeModels(pi, options);
+  await pi.command!.handler("probe coder-a", { ui: { notify: (text: string) => seen.push(text) } });
+  check("进度在第一个请求发出前就 notify：逐字", same(atFirstFetch, ["探活 1 条模型，最坏约 15 秒"]), JSON.stringify(atFirstFetch));
+  check("结果在进度之后 notify", seen.length === 2 && seen[1].includes("coder-a | ok"), JSON.stringify(seen));
+}
+
+{
+  for (const mode of ["signal", "getSignal"] as const) {
+    const catalog = authFetch(() => jsonResponse(PROBE_CATALOG));
+    const feed = probeFeed(() => probeReply({}));
+    const { pi, options } = runFactory({ PI_FACADE_GATEWAY: MOCK_GATEWAY }, tempHome(), {
+      fetchOptions: { fetchImpl: catalog.fetchImpl },
+      probe: { fetchImpl: feed.impl },
+    });
+    await facadeModels(pi, options);
+    const controller = new AbortController();
+    controller.abort();
+    const seen: string[] = [];
+    const ctx =
+      mode === "signal"
+        ? { ui: { notify: (text: string) => seen.push(text) }, signal: controller.signal }
+        : { ui: { notify: (text: string) => seen.push(text) }, getSignal: () => controller.signal };
+    await pi.command!.handler("probe coder-a", ctx);
+    check(
+      `ctx.${mode} 的取消信号透传到 core：不发请求，逐字输出 cancelled`,
+      feed.calls.length === 0 &&
+        same(probeLines(seen.join("\n")), [
+          "探活 1 条模型，最坏约 15 秒",
+          "模型 | 状态 | HTTP | 延迟",
+          "coder-a | cancelled | - | Xms",
+          "coder-a: cancelled by caller",
+          PROBE_WARNING,
+        ]),
+      JSON.stringify({ calls: feed.calls.length, lines: probeLines(seen.join("\n")) }),
+    );
+  }
 }
 
 console.log("");

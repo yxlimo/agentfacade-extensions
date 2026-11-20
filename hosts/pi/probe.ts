@@ -2,7 +2,7 @@
 // 状态码怎么解释是 core/probe.ts 的事；这里没有 if (status === …)，也不回显密钥。
 
 import { resolveHostAuthKey } from "../../core/auth.ts";
-import { probeModels, type ProbeResult } from "../../core/probe.ts";
+import { probeModels, probePlan, type ProbeResult } from "../../core/probe.ts";
 import { resolveGateway } from "./gateway-config.ts";
 import type { PluginOptions, PluginState } from "./index.ts";
 
@@ -37,17 +37,33 @@ function target(options: PluginOptions): { gateway: string; apiKey?: string } | 
 }
 
 /** 不给模型名就探当前已注册的那批；解析与分类都不在这里做 */
-export async function runProbe(args: string, state: PluginState, options: PluginOptions): Promise<string[]> {
+export interface ProbeInvocation {
+  /** 宿主给的取消信号；能拿到就传，拿不到就不传 */
+  signal?: AbortSignal;
+  /** 长命令开始前先报一句进度，避免「卡住」的错觉 */
+  notify?: (message: string) => void;
+}
+
+export async function runProbe(
+  args: string,
+  state: PluginState,
+  options: PluginOptions,
+  invocation: ProbeInvocation = {},
+): Promise<string[]> {
   const names = args.trim().split(/\s+/).filter((part) => part !== "");
   const models = names.length > 0 ? names : state.models.map((model) => model.id);
   if (models.length === 0) return ["没有模型可探：先 /agentfacade refresh，或给出模型名"];
   const chosen = target(options);
   if ("error" in chosen) return [chosen.error];
+  const plan = probePlan(models.length, options.probe);
+  // 先报进度再 await：默认全量探活最坏几十秒，事后才 notify 等于让用户对着空白等待
+  invocation.notify?.(`探活 ${plan.count} 条模型，最坏约 ${Math.ceil(plan.worstMs / 1000)} 秒`);
   const results = await probeModels({
     gateway: chosen.gateway,
     ...(chosen.apiKey === undefined ? {} : { apiKey: chosen.apiKey }),
     models,
     ...options.probe,
+    ...(invocation.signal === undefined ? {} : { signal: invocation.signal }),
   });
   return renderProbe(results);
 }

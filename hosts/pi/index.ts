@@ -35,6 +35,9 @@ export interface PiExtensionApi {
 /** 命令里要用到的那一格；pi 真的 ctx 比这个宽得多 */
 export interface CommandContext {
   ui?: { notify?: (message: string, level?: string) => void };
+  // pi 1.5.x 的 ctx 上有当前操作的 signal（空闲时 undefined），也有 getSignal()；只透传，不自己造取消语义
+  signal?: AbortSignal;
+  getSignal?: () => AbortSignal | undefined;
 }
 
 /** refreshModels 收到的上下文（docs/extensions.md 的 credential/stored-catalog/network/signal）；本插件只用 signal */
@@ -280,10 +283,20 @@ export default async function facadeModels(pi: PiExtensionApi, options: PluginOp
       return;
     }
     if (/^probe\b/i.test(trimmed)) {
-      // 命令只接线：runProbe 调 core 并把表排好，这里只负责送出去
-      const text = (await runProbe(trimmed.replace(/^probe\b/i, ""), state, options)).join("\n");
-      if (typeof ctx?.ui?.notify === "function") ctx.ui.notify(text, "info");
-      else console.log(`${PREFIX} ${text}`);
+      // 命令只接线：runProbe 在 await 之前发进度，结果在这里发；ctx 的取消信号只透传
+      const uiNotify = ctx?.ui?.notify;
+      const notify = (message: string, level = "info"): void => {
+        if (typeof uiNotify === "function") uiNotify(message, level);
+        else console.log(`${PREFIX} ${message}`);
+      };
+      const signal = ctx?.signal ?? ctx?.getSignal?.();
+      const text = (
+        await runProbe(trimmed.replace(/^probe\b/i, ""), state, options, {
+          ...(signal === undefined ? {} : { signal }),
+          notify,
+        })
+      ).join("\n");
+      notify(text);
       return;
     }
     if (trimmed.toLowerCase() === "refresh") {

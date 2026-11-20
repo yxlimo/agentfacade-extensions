@@ -40,7 +40,7 @@ import {
   writeFacadeConfig,
 } from "../gateway-config.ts";
 import { syncCatalog, type SyncDeps, type SyncState } from "../sync.ts";
-import { probeModels, type ProbeResult } from "../probe.ts";
+import { probeModels, probePlan, type ProbeResult } from "../probe.ts";
 import type { HostAdapter, ModelSpec } from "../types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1526,7 +1526,7 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
     "探活请求逐字：chat 路径 / POST / 最小体 / Bearer 头",
     same(feed.calls, [
       {
-        url: "http://gw.example:6450/v1/chat/completions",
+        url: "http://gw.example:6450/v1/chat/completions?dialect=openai",
         method: "POST",
         headers: { accept: "application/json", "content-type": "application/json", authorization: "Bearer sk-probe-secret" },
         body: { model: "m1", messages: [{ role: "user", content: "hi" }], max_tokens: 1 },
@@ -1539,7 +1539,28 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
     same(withoutLatency(results), [{ model: "m1", status: "ok", httpStatus: 200 }]),
     JSON.stringify(withoutLatency(results)),
   );
-  check("延迟是实测的非负毫秒数", typeof results[0].latencyMs === "number" && results[0].latencyMs >= 0, JSON.stringify(results[0]));
+}
+
+{
+  // 延迟若是写死的 0 或常量，范围断言照样绿：用可控时钟把它钉成逐字快照
+  const realNow = Date.now;
+  let clock = 1000;
+  Date.now = () => clock;
+  let results: ProbeResult[] = [];
+  try {
+    const feed = probeFetch(() => {
+      clock += 7;
+      return probeResponse({});
+    });
+    results = await probeModels({ gateway: PROBE_GATEWAY, models: ["m1"], fetchImpl: feed.impl });
+  } finally {
+    Date.now = realNow;
+  }
+  check(
+    "延迟是两次 Date.now 的实测差：逐字 7ms",
+    same(results, [{ model: "m1", status: "ok", httpStatus: 200, latencyMs: 7 }]),
+    JSON.stringify(results),
+  );
 
   const open = probeFetch(() => probeResponse({}));
   await probeModels({ gateway: PROBE_GATEWAY, models: ["m1"], fetchImpl: open.impl });
@@ -1555,7 +1576,7 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
   await probeModels({ gateway: "http://gw.example:6450?token=abc", models: ["m1"], fetchImpl: feed.impl });
   check(
     "探活地址复用统一拼接：自带 query 时用 & 接，不出现第二个 ?",
-    feed.calls[0].url === "http://gw.example:6450/v1/chat/completions?token=abc",
+    feed.calls[0].url === "http://gw.example:6450/v1/chat/completions?token=abc&dialect=openai",
     feed.calls[0].url,
   );
 }
@@ -1566,11 +1587,16 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
     { name: "403 → auth", status: 403, body: { error: { message: "forbidden model" } }, expected: { status: "auth", httpStatus: 403, detail: "forbidden model" } },
     { name: "402 + exceed quota limit → quota", status: 402, body: { error: { message: "exceed quota limit for coder-a" } }, expected: { status: "quota", httpStatus: 402, detail: "exceed quota limit for coder-a" } },
     { name: "402 + insufficient_quota → quota", status: 402, body: { error: { message: "insufficient_quota" } }, expected: { status: "quota", httpStatus: 402, detail: "insufficient_quota" } },
-    { name: "402 没有额度关键词 → unclassified（不猜）", status: 402, body: { error: { message: "payment required" } }, expected: { status: "unclassified", httpStatus: 402, detail: "payment required" } },
+    { name: "402 没有额度关键词 → quota（402 一律 Payment Required，不看正文）", status: 402, body: { error: { message: "upstream account is out of credits" } }, expected: { status: "quota", httpStatus: 402, detail: "upstream account is out of credits" } },
+    { name: "404 → missing（模型 id 不对，动作是改 id）", status: 404, body: { error: { message: "unknown model" } }, expected: { status: "missing", httpStatus: 404, detail: "unknown model" } },
+    { name: "429 → throttled（限流，动作是等一会再来）", status: 429, body: { error: { message: "rate limit exceeded" } }, expected: { status: "throttled", httpStatus: 429, detail: "rate limit exceeded" } },
+    { name: "400 命中额度词 → quota（词表只作其它状态的辅助）", status: 400, body: { error: { message: "insufficient_quota" } }, expected: { status: "quota", httpStatus: 400, detail: "insufficient_quota" } },
     { name: "其它 2xx（201）→ unclassified，仍然给 detail（只有 200 算 ok）", status: 201, body: "", expected: { status: "unclassified", httpStatus: 201, detail: "HTTP 201" } },
     { name: "502 包着上游 400 → upstream，detail 留上游原文", status: 502, body: { error: { message: "Bad Gateway", upstream: { status: 400, body: "model coder-a is not allowed in this plan" } } }, expected: { status: "upstream", httpStatus: 502, detail: "Bad Gateway | model coder-a is not allowed in this plan" } },
     { name: "502 包着 insufficient_quota → upstream", status: 502, body: { error: { message: "Bad Gateway", upstream: { body: "insufficient_quota from provider" } } }, expected: { status: "upstream", httpStatus: 502, detail: "Bad Gateway | insufficient_quota from provider" } },
     { name: "502 没有上游线索 → unclassified（不把 502 一律当上游）", status: 502, body: { error: { message: "Bad Gateway" } }, expected: { status: "unclassified", httpStatus: 502, detail: "Bad Gateway" } },
+    { name: "502 只有自己的 code:403 → unclassified（code 不算上游证据）", status: 502, body: { error: { message: "Bad Gateway", code: 403 } }, expected: { status: "unclassified", httpStatus: 502, detail: "Bad Gateway" } },
+    { name: "502 + 字符串型 upstream 原文 → upstream，detail 留住原文", status: 502, body: { error: { message: "Bad Gateway", upstream: "upstream code 403: plan rejected" } }, expected: { status: "upstream", httpStatus: 502, detail: "Bad Gateway | upstream code 403: plan rejected" } },
     { name: "其它 500 → unclassified，detail 取 error.message", status: 500, body: { error: { message: "internal boom" } }, expected: { status: "unclassified", httpStatus: 500, detail: "internal boom" } },
   ];
   for (const item of cases) {
@@ -1593,6 +1619,19 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
       { model: "html", status: "unclassified", httpStatus: 503, detail: "<html>nope</html>" },
       { model: "empty", status: "unclassified", httpStatus: 500, detail: "HTTP 500" },
       { model: "huge", status: "unclassified", httpStatus: 500, detail: `${"x".repeat(399)}…` },
+    ]),
+    JSON.stringify(withoutLatency(results)),
+  );
+}
+
+{
+  const prefix = '{"error":{"message":"';
+  const feed = probeFetch(() => probeResponse(`${prefix}${"y".repeat(6000)} quota exceeded"}` , 400));
+  const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["far"], fetchImpl: feed.impl });
+  check(
+    "几 MB 级错误体先截断再解析：上限外的额度词不参与分类，detail 逐字",
+    same(withoutLatency(results), [
+      { model: "far", status: "unclassified", httpStatus: 400, detail: `${prefix}${"y".repeat(399 - prefix.length)}…` },
     ]),
     JSON.stringify(withoutLatency(results)),
   );
@@ -1660,6 +1699,95 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
   const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["a", "b", "c", "d", "e"], concurrency: 2, fetchImpl: impl });
   check("并发上限：5 条模型、concurrency=2 时在途峰值恰好 2", peak === 2, String(peak));
   check("并发下输出顺序仍与输入一致", same(results.map((r) => r.model), ["a", "b", "c", "d", "e"]), JSON.stringify(results.map((r) => r.model)));
+}
+
+{
+  const plans: Array<{ name: string; options: { concurrency?: number; timeoutMs?: number }; expected: unknown }> = [
+    { name: "concurrency=0", options: { concurrency: 0 }, expected: { count: 3, timeoutMs: 15000, concurrency: 4, worstMs: 15000 } },
+    { name: "concurrency=-1", options: { concurrency: -1 }, expected: { count: 3, timeoutMs: 15000, concurrency: 4, worstMs: 15000 } },
+    { name: "concurrency=NaN", options: { concurrency: NaN }, expected: { count: 3, timeoutMs: 15000, concurrency: 4, worstMs: 15000 } },
+    { name: "concurrency=1e9", options: { concurrency: 1e9 }, expected: { count: 3, timeoutMs: 15000, concurrency: 1e9, worstMs: 15000 } },
+    { name: "timeoutMs=0", options: { timeoutMs: 0 }, expected: { count: 3, timeoutMs: 15000, concurrency: 4, worstMs: 15000 } },
+    { name: "timeoutMs=-1", options: { timeoutMs: -1 }, expected: { count: 3, timeoutMs: 15000, concurrency: 4, worstMs: 15000 } },
+    { name: "timeoutMs=NaN", options: { timeoutMs: NaN }, expected: { count: 3, timeoutMs: 15000, concurrency: 4, worstMs: 15000 } },
+    { name: "timeoutMs=1e9", options: { timeoutMs: 1e9 }, expected: { count: 3, timeoutMs: 1e9, concurrency: 4, worstMs: 1e9 } },
+  ];
+  for (const item of plans) {
+    check(`探活参数兜底逐字：${item.name}`, same(probePlan(3, item.options), item.expected), JSON.stringify(probePlan(3, item.options)));
+  }
+}
+
+{
+  let inFlight = 0;
+  let peak = 0;
+  const impl = (async () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight--;
+    return probeResponse({});
+  }) as unknown as typeof fetch;
+  const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["a", "b", "c"], concurrency: 0, fetchImpl: impl });
+  check(
+    "concurrency=0 钳到默认 4：三条全探完、在途峰值 3（不是 0 也不是 1）",
+    same(results.map((r) => r.model), ["a", "b", "c"]) && peak === 3,
+    JSON.stringify({ models: results.map((r) => r.model), peak }),
+  );
+}
+
+{
+  for (const value of [0, -1, NaN]) {
+    const impl = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return probeResponse({});
+    }) as unknown as typeof fetch;
+    const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["m"], timeoutMs: value, fetchImpl: impl });
+    check(
+      `timeoutMs=${String(value)} 钳回默认 15000：20ms 的慢响应仍是 ok`,
+      same(withoutLatency(results), [{ model: "m", status: "ok", httpStatus: 200 }]),
+      JSON.stringify(withoutLatency(results)),
+    );
+  }
+}
+
+{
+  const feed = probeFetch(() => probeResponse({}));
+  const controller = new AbortController();
+  controller.abort();
+  const results = await probeModels({ gateway: PROBE_GATEWAY, models: ["a", "b"], signal: controller.signal, fetchImpl: feed.impl });
+  check(
+    "预取消：一条请求都不发，逐字结果都是 cancelled",
+    same(withoutLatency(results), [
+      { model: "a", status: "cancelled", detail: "cancelled by caller" },
+      { model: "b", status: "cancelled", detail: "cancelled by caller" },
+    ]) && feed.calls.length === 0,
+    JSON.stringify({ results: withoutLatency(results), calls: feed.calls.length }),
+  );
+}
+
+{
+  const signals: AbortSignal[] = [];
+  let release: (() => void) | undefined;
+  const hang = ((_input: unknown, init?: RequestInit) => {
+    signals.push(init?.signal as AbortSignal);
+    return new Promise<Response>((resolve) => {
+      release = () => resolve(probeResponse({}));
+    });
+  }) as unknown as typeof fetch;
+  const controller = new AbortController();
+  const pending = probeModels({ gateway: PROBE_GATEWAY, models: ["a", "b"], signal: controller.signal, timeoutMs: 1000, fetchImpl: hang });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  controller.abort();
+  const results = await pending;
+  check(
+    "中途取消：立刻 cancelled，不被迟到的成功响应洗成 ok，每条 fetch 都拿到 signal",
+    same(withoutLatency(results), [
+      { model: "a", status: "cancelled", detail: "cancelled by caller" },
+      { model: "b", status: "cancelled", detail: "cancelled by caller" },
+    ]) && signals.length === 2 && signals.every((signal) => signal.aborted),
+    JSON.stringify({ results: withoutLatency(results), signals: signals.length, aborted: signals.map((signal) => signal.aborted) }),
+  );
+  release?.();
 }
 
 {

@@ -2,7 +2,7 @@
 //
 //   cd hosts/pi && node --experimental-strip-types test/check.ts
 //
-// 覆盖四块：
+// 覆盖五块：
 //   · 字段映射：ModelSpec[] → pi 的 provider 配置。输入面是下面手写的 SPECS（17 条），
 //     期望值写在 fixtures/expected.ts 里 —— 手写快照，不由任何程序生成。
 //     网关报文长什么样不在这层：那是 core 的事，形状只留一份。
@@ -11,6 +11,8 @@
 //     可达时注册的模型数等于 /v1/models 的 data 长度，不可达时**不注册**且不抛
 //   · 刷新与命令：refreshModels 重新拉、拉不到时交回上一次的清单而不是空数组、
 //     /facade-models 显示的几个数字
+//   · session-affinity 头：真的 pi-ai stream 打本地假上游 —— compat 旗子要真的到得了
+//     请求头才算数（配置对象上的断言不是证据）
 //
 // 全部离线：假网关在本机、清单是手写的 ModelSpec，不碰真网关也不花额度。
 
@@ -34,6 +36,11 @@ import { resolveGateway } from "../gateway-config.ts";
 import { EXPECTED as EXPECTED_SNAPSHOT } from "../fixtures/expected.ts";
 import { startFakeUpstream } from "./fake-upstream.ts";
 
+// 线上用例的对象：真的 pi-ai（1.5.2，与 pi 同版钉死）的 anthropic-messages 适配器。
+// 只走导出表（./api/*、./utils/*、根 ./ 的类型）；pi-ai 的 package.json 没在导出表里，不许 import。
+import { stream } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import type { Model } from "@earendil-works/pi-ai";
 const EXPECTED = EXPECTED_SNAPSHOT;
 
 /**
@@ -1310,6 +1317,84 @@ function probeLines(text: string): string[] {
       JSON.stringify({ calls: feed.calls.length, lines: probeLines(seen.join("\n")) }),
     );
   }
+}
+
+// ── session-affinity 头：真的 pi-ai stream，打到线上为止 ────────────────
+//
+// 配置对象里的 compat 旗子不是证据：它只证明适配器把旗子写进了对象，不证明旗子到得了
+// 请求。这里起真的本地 node:http 假上游（复用 startFakeUpstream），用真的 pi-ai stream
+// 发一条消息 —— 不打桩 fetch，桩只能断言测试自己构造的东西，断言不了 pi-ai 实际发了什么。
+// 上游实现（pi-ai 1.5.2 dist/api/anthropic-messages.js）：sessionId 且
+// compat.sendSessionAffinityHeaders 时发 x-session-affinity: <sessionId>
+//（sessionAffinityFormat === "openrouter" 才是 x-session-id，本适配器不设）。
+// 假上游一律答 400：流以 error 事件收尾，用例不依赖任何模型输出，也不会 hang。
+
+console.log("");
+console.log("session-affinity 头（真的 pi-ai stream，本地假上游，不桩 fetch）");
+
+const AFFINITY_SESSION_ID = "sess-probe-123";
+
+/** provider 配置条目 → pi-ai 的 Model：api/baseUrl 取自 toProviderConfig 的产物，其余逐字来自条目 */
+function toAiModel(config: PiProviderConfig, entry: PiModelEntry): Model<"anthropic-messages"> {
+  return {
+    id: entry.id,
+    name: entry.name,
+    // PiProviderConfig.api 是 string；这条用例固定走 anthropic-messages 方言
+    api: config.api as "anthropic-messages",
+    provider: config.name,
+    baseUrl: config.baseUrl,
+    input: entry.input,
+    cost: entry.cost,
+    reasoning: entry.reasoning,
+    thinkingLevelMap: entry.thinkingLevelMap,
+    contextWindow: entry.contextWindow,
+    maxTokens: entry.maxTokens,
+    compat: entry.compat,
+  };
+}
+
+/** 走真的 stream 发一条消息，抓回假上游收到的请求头；400 让流立刻收尾 */
+async function captureChatRequestHeaders(entry: PiModelEntry): Promise<Record<string, string>> {
+  const fake = await startFakeUpstream(() => ({
+    status: 400,
+    body: { type: "error", error: { type: "invalid_request_error", message: "session-affinity probe 到此为止" } },
+  }));
+  try {
+    const config = toProviderConfig(fake.url, "public", [entry]);
+    const events = stream(
+      toAiModel(config, config.models[0]),
+      normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
+      { apiKey: "public", sessionId: AFFINITY_SESSION_ID },
+    );
+    for await (const event of events) {
+      if (event.type === "error" || event.type === "done") break;
+    }
+    // error/done 都在请求发完之后才来：这时假上游必然已经收到请求
+    if (fake.requests.length === 0) throw new Error("假上游没有收到任何请求");
+    return fake.requests[0].headers;
+  } finally {
+    await fake.close();
+  }
+}
+
+{
+  const headers = await captureChatRequestHeaders(toPiModelEntry(spec({ id: "sess-affinity", displayName: "Sess Affinity" })));
+  check(
+    `compat.sendSessionAffinityHeaders=true → 真的请求头带 x-session-affinity: ${AFFINITY_SESSION_ID}（观察值: ${headers["x-session-affinity"] ?? "无"}）`,
+    headers["x-session-affinity"] === AFFINITY_SESSION_ID,
+    JSON.stringify(headers),
+  );
+}
+
+{
+  // 反向必须真跑（不是 skip）：只测正向的那天，别的头带上 session 字样，正向就为错的理由绿着
+  const entry = toPiModelEntry(spec({ id: "sess-off", displayName: "Sess Off" }));
+  const offHeaders = await captureChatRequestHeaders({ ...entry, compat: { ...entry.compat, sendSessionAffinityHeaders: false } });
+  check(
+    "compat.sendSessionAffinityHeaders=false → 请求头里没有任何 session/affinity 字样",
+    Object.entries(offHeaders).every(([name, value]) => !/session|affinity/i.test(name) && !/session|affinity/i.test(String(value))),
+    JSON.stringify(offHeaders),
+  );
 }
 
 console.log("");

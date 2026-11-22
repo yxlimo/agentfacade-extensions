@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# 打包 + 把每个包发到 npm。tag 上跑一次就是全量发布。
+# 【仅本地】打包 + 把每个包发到 npm。
+#
+# CI 不走这个脚本：.github/workflows/publish.yml 用 OIDC（trusted
+# publishing）发布，仓库里不留 NPM_TOKEN。这个脚本仅在本地手工发布时用，
+# 那时没有 OIDC 身份，只能靠 ~/.npmrc 里的 token。
 #
 #   bash scripts/publish-all.sh                  # 真发布
 #   bash scripts/publish-all.sh --dry-run        # 只看选中了哪些包，不上传

@@ -1,31 +1,51 @@
 name: Publish
 
-# 发布由 tag 驱动：`git tag v0.1.0 && git push --tags` 就是全部动作。
-# 发出去的是各包 package.json 里的版本，脚本会跳过 npm 上已存在的版本，
-# 所以重跑一次 tag 也能把上次没发完的包补上。
+# Trusted publisher：yxlimo/agentfacade-extensions + publish.yml +
+# environment `npm`。仓库里不存任何 npm 凭据，认证只走 OIDC。
+#
+# 发布动作只有一步：改版本号 → git tag v0.1.2 → git push origin v0.1.2
+#
+# 四段式（判据照 nredd/pi-harness 的 publish.yml）：
+#   verify  —— 类型检查与测试全绿；tag 与包版本对账；tag 提交必须在
+#              origin/main 上；打包一次，算出 sha256/sha512，产出
+#              identity.json / manifest.json / SHA256SUMS
+#   attest  —— 只给 .build/*.tgz 生成 GitHub 构建证明：不签出代码、
+#              不跑包脚本、无 npm 凭据
+#   publish —— environment: npm；核对工具链下限与逐字节幂等后，发布
+#              verify 阶段校验过的那批 tarball，再回查 registry 完整性
+#              与 provenance，并跑 npm audit signatures
+#   release —— 用同一批产物建 GitHub release
+#
+# 硬规则：publish 阶段绝不重新打包；版本已在 registry 上且字节相同就
+# 跳过，字节不同就整体失败——复用一个已发布的版本号比不发布危险得多。
+
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: read
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     permissions:
       contents: read
-      id-token: write # npm trusted publishing 与 provenance
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # 祖先检查需要 main 的引用，所以要完整历史。
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
           version: 12
 
-      # Trusted publishing 需要较新的 npm，node 24 带的比 CI 用的 node 22 新。
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
@@ -40,9 +60,157 @@ jobs:
       - name: Tests
         run: pnpm test
 
-      # 两个认证途径：NPM_TOKEN secret 存在就用它；不存在就走 npm 的
-      # trusted publishing（这台 job 的 OIDC 换一个短期凭据，什么都不用存）。
-      - name: Publish all packages
+      - name: Fetch main for the ancestry check
+        run: git fetch origin main:refs/remotes/origin/main
+
+      - name: Preflight (tag vs package versions, tag commit on main)
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: bash scripts/publish-all.sh --provenance --access public
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release.mjs preflight --tag "$RELEASE_TAG"
+
+      - name: Pack once and describe the exact bytes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release.mjs verify --tag "$RELEASE_TAG"
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: npm-release-${{ github.run_id }}
+          path: .build/
+          if-no-files-found: error
+          retention-days: 30
+
+  attest:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      # 没有 checkout、没有包脚本、没有 npm 凭据：只给产出的字节签证明。
+      # yamllint disable-line rule:line-length
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: npm-release-${{ github.run_id }}
+          path: ${{ runner.temp }}/npm-release/
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: ${{ runner.temp }}/npm-release/*.tgz
+
+  publish:
+    needs: attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # 这一行就是 npmjs.com 上 Trusted Publisher 里要填的 environment，
+    # 也是 GitHub 侧边栏出现 Deployments 记录的原因。两边必须一致，
+    # 否则 OIDC 校验失败、发布直接被拒。
+    environment: npm
+    permissions:
+      id-token: write
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: npm-release-${{ github.run_id }}
+          path: ${{ runner.temp }}/npm-release/
+
+      # 不装依赖、不构建：只读 hosts/*/package.json 与那批 tarball。
+      - name: Assert toolchain and refuse to overwrite a published version
+        id: candidate
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          node scripts/release.mjs publish-check
+          --tag "$RELEASE_TAG"
+          --artifact-dir "$RUNNER_TEMP/npm-release"
+
+      - name: Verify the tarballs' provenance at this tag and commit
+        if: steps.candidate.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH_LIST: ${{ steps.candidate.outputs.publish-list }}
+          ARTIFACT_DIR: ${{ runner.temp }}/npm-release
+        run: |
+          set -euo pipefail
+          for tarball in ${PUBLISH_LIST//,/ }; do
+            gh attestation verify "$ARTIFACT_DIR/$tarball" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow \
+                "$GITHUB_REPOSITORY/.github/workflows/publish.yml" \
+              --source-ref "$GITHUB_REF" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
+
+      - name: Publish the verified tarballs with OIDC
+        if: steps.candidate.outputs.publish == 'true'
+        env:
+          PUBLISH_LIST: ${{ steps.candidate.outputs.publish-list }}
+          ARTIFACT_DIR: ${{ runner.temp }}/npm-release
+        run: |
+          set -euo pipefail
+          for tarball in ${PUBLISH_LIST//,/ }; do
+            # 发的是校验过的那份字节；带 --provenance 是为了让缺失
+            # 在发布前就失败，而不是发完才发现没有证明。
+            npm publish "$ARTIFACT_DIR/$tarball" \
+              --access public --provenance
+          done
+
+      - name: Verify registry integrity, signatures and provenance
+        if: steps.candidate.outputs.publish == 'true'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          node scripts/release.mjs registry-check
+          --tag "$RELEASE_TAG"
+          --artifact-dir "$RUNNER_TEMP/npm-release"
+
+  release:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: npm-release-${{ github.run_id }}
+          path: ${{ runner.temp }}/npm-release/
+
+      - name: Create the release from the verified artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ARTIFACT_DIR: ${{ runner.temp }}/npm-release
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG 已存在，跳过"
+            exit 0
+          fi
+          gh release create "$RELEASE_TAG" --verify-tag \
+            --title "$RELEASE_TAG" \
+            --notes "Verified npm publication." \
+            "$ARTIFACT_DIR"/*.tgz \
+            "$ARTIFACT_DIR/SHA256SUMS" \
+            "$ARTIFACT_DIR/identity.json" \
+            "$ARTIFACT_DIR/manifest.json"

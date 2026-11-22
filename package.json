@@ -11,7 +11,8 @@
     "test:opencode": "node --experimental-strip-types hosts/opencode/test/check.ts",
     "test:dsh": "node --experimental-strip-types hosts/dsh/test/check.ts",
     "test:boundary": "node --experimental-strip-types scripts/check-boundary.ts",
-    "test": "pnpm run test:core && pnpm run test:pi && pnpm run test:opencode && pnpm run test:dsh && pnpm run test:boundary"
+    "test:release": "node --test scripts/release.test.mjs",
+    "test": "pnpm run test:release && pnpm run test:core && pnpm run test:pi && pnpm run test:opencode && pnpm run test:dsh && pnpm run test:boundary"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -28,6 +28,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # hosts/pi 是唯一自带 lockfile 的宿主包：根 tsconfig 会编译它的 test/，
+      # 但它依赖的 @earendil-works/pi-ai 只装在这里，根 pnpm install 看不到。
+      # 漏掉这一步，CI 的类型检查必然报 "Cannot find module @earendil-works/pi-ai"。
+      - name: Install host dependencies
+        working-directory: hosts/pi
+        run: pnpm install --frozen-lockfile
+
       - name: Type check
         run: pnpm run typecheck
 

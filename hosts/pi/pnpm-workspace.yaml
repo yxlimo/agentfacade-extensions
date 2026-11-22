@@ -1,0 +1,5 @@
+# pi's transitive dependencies (@google/genai, protobufjs) ship build scripts
+# this package never uses: only their type declarations matter for the wire
+# tests in test/check.ts. Without this setting, pnpm 10+ refuses to install
+# with ERR_PNPM_IGNORED_BUILDS.
+strictDepBuilds: false

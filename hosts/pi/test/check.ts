@@ -34,11 +34,11 @@ import type { PollerTimers } from "../../../core/poll.ts";
 import type { ModelSpec } from "../../../core/types.ts";
 import { resolveGateway } from "../gateway-config.ts";
 import { EXPECTED as EXPECTED_SNAPSHOT } from "../fixtures/expected.ts";
-import { startFakeUpstream } from "./fake-upstream.ts";
+import { startFakeUpstream, type CapturedRequest } from "./fake-upstream.ts";
 
 // 线上用例的对象：真的 pi-ai（1.5.2，与 pi 同版钉死）的 anthropic-messages 适配器。
 // 只走导出表（./api/*、./utils/*、根 ./ 的类型）；pi-ai 的 package.json 没在导出表里，不许 import。
-import { stream } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { stream, streamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import type { Model } from "@earendil-works/pi-ai";
 const EXPECTED = EXPECTED_SNAPSHOT;
@@ -1397,6 +1397,90 @@ async function captureChatRequestHeaders(entry: PiModelEntry): Promise<Record<st
   );
 }
 
+console.log("");
+console.log("forceAdaptiveThinking（真的 streamSimple，假上游断言收到的请求体）");
+console.log("  这条旗子只在「走了 streamSimple 且请求了 reasoning」时才生效：thinking 换成 adaptive 形态，");
+console.log("  档位写进 output_config.effort。四条用例分别钉住生效、不生效、按档位映射、以及不额外开思考。");
+
+/** 走真实 streamSimple（pi 用的就是它），抓回假上游收到的整条请求：头与体都留着 */
+async function captureSimpleChatRequest(
+  entry: PiModelEntry,
+  reasoning?: "minimal" | "low" | "medium" | "high",
+): Promise<CapturedRequest> {
+  const fake = await startFakeUpstream(() => ({
+    status: 400,
+    body: { type: "error", error: { type: "invalid_request_error", message: "adaptive probe 到此为止" } },
+  }));
+  try {
+    const config = toProviderConfig(fake.url, "public", [entry]);
+    const events = streamSimple(
+      toAiModel(config, config.models[0]),
+      normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
+      { apiKey: "public", sessionId: AFFINITY_SESSION_ID, reasoning },
+    );
+    for await (const event of events) {
+      if (event.type === "error" || event.type === "done") break;
+    }
+    // error/done 都在请求发完之后才来：这时假上游必然已经收到请求
+    const first = fake.last();
+    if (!first) throw new Error("假上游没有收到任何请求");
+    return first;
+  } finally {
+    await fake.close();
+  }
+}
+
+type AdaptiveBody = {
+  thinking?: { type?: string; budget_tokens?: number };
+  output_config?: { effort?: string };
+};
+
+{
+  const req = await captureSimpleChatRequest(toPiModelEntry(spec({ id: "adapt-on", displayName: "Adapt On" })), "high");
+  const body = req.json<AdaptiveBody>();
+  check(
+    `forceAdaptiveThinking=true + reasoning=high → thinking.type=adaptive 且 output_config.effort=high（观察值: ${JSON.stringify(body?.thinking)} / ${JSON.stringify(body?.output_config)}）`,
+    body?.thinking?.type === "adaptive" && body?.output_config?.effort === "high",
+    req.body,
+  );
+}
+
+{
+  // 反向必须真跑：它同时证明「adaptive 不是因为我们什么都发 adaptive 才绿」
+  const on = toPiModelEntry(spec({ id: "adapt-off", displayName: "Adapt Off" }));
+  const req = await captureSimpleChatRequest(
+    { ...on, compat: { ...on.compat, forceAdaptiveThinking: false } },
+    "high",
+  );
+  const body = req.json<AdaptiveBody>();
+  check(
+    `forceAdaptiveThinking=false + reasoning=high → thinking.type=enabled（预算制）且没有 output_config（观察值: ${JSON.stringify(body?.thinking)}）`,
+    body?.thinking?.type === "enabled" && body?.output_config === undefined,
+    req.body,
+  );
+}
+
+{
+  // 档位必须来自 reasoning：把 effort 写死成 high 的实现会在这里红
+  const req = await captureSimpleChatRequest(toPiModelEntry(spec({ id: "adapt-low", displayName: "Adapt Low" })), "low");
+  const body = req.json<AdaptiveBody>();
+  check(
+    `forceAdaptiveThinking=true + reasoning=low → output_config.effort=low（观察值: ${JSON.stringify(body?.output_config)}）`,
+    body?.output_config?.effort === "low",
+    req.body,
+  );
+}
+
+{
+  // 旗子不能自己开思考：没请求 reasoning 时必须还是 disabled
+  const req = await captureSimpleChatRequest(toPiModelEntry(spec({ id: "adapt-none", displayName: "Adapt None" })));
+  const body = req.json<AdaptiveBody>();
+  check(
+    `forceAdaptiveThinking=true 但不请求 reasoning → 既不是 adaptive 也没有 output_config（观察值: thinking=${JSON.stringify(body?.thinking)}, output_config=${JSON.stringify(body?.output_config)}）`,
+    body?.thinking?.type !== "adaptive" && body?.output_config === undefined,
+    req.body,
+  );
+}
 console.log("");
 console.log(fail === 0 ? `全部通过（${pass} 条）` : `${fail} 条失败，${pass} 条通过`);
 process.exit(fail === 0 ? 0 : 1);

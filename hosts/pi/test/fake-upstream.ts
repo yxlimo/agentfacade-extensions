@@ -16,6 +16,8 @@ export interface CapturedRequest {
   url: string;
   headers: Record<string, string>;
   body: string;
+  /** body 按 JSON 解析一次并缓存；解析不了返回 undefined（不抛） */
+  json<T = unknown>(): T | undefined;
 }
 
 export interface FakeUpstream {
@@ -23,6 +25,10 @@ export interface FakeUpstream {
   url: string;
   /** 收到的每个请求，按顺序（含 body 全文） */
   requests: CapturedRequest[];
+  /** 最后收到的请求；一个都没收到时 undefined */
+  last(): CapturedRequest | undefined;
+  /** 最后一个请求的 body 解析结果；没有请求或解析失败都是 undefined */
+  lastJson<T = unknown>(): T | undefined;
   /** 关掉并把还挂着的连接 destroy 掉 */
   close(): Promise<void>;
 }
@@ -39,11 +45,23 @@ export async function startFakeUpstream(handler?: FakeHandler): Promise<FakeUpst
     const chunks: Buffer[] = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
+      let parsed: { value?: unknown } | undefined;
       const captured: CapturedRequest = {
         method: req.method ?? "",
         url: req.url ?? "",
         headers: { ...req.headers } as Record<string, string>,
         body: Buffer.concat(chunks).toString("utf8"),
+        json<T = unknown>(): T | undefined {
+          // 首次调用才解析；解析失败记成空对象，反复调用不再抛
+          if (!parsed) {
+            try {
+              parsed = { value: JSON.parse(captured.body) };
+            } catch {
+              parsed = {};
+            }
+          }
+          return parsed.value as T | undefined;
+        },
       };
       requests.push(captured);
       const out = handler?.(captured);
@@ -64,6 +82,12 @@ export async function startFakeUpstream(handler?: FakeHandler): Promise<FakeUpst
   return {
     url: `http://127.0.0.1:${addr.port}`,
     requests,
+    last() {
+      return requests[requests.length - 1];
+    },
+    lastJson<T = unknown>() {
+      return requests[requests.length - 1]?.json<T>();
+    },
     close() {
       // 坑：只调 server.close() 会等 keep-alive 连接自然断开（undici 的连接
       // 默认挂好几分钟），promise 永不 resolve —— 测试看起来关了其实没关，

@@ -52,11 +52,16 @@ git push origin v0.1.2
 ## 本地手工发布（不走 CI）
 
 ```sh
-bash scripts/publish-all.sh --dry-run   # 只看会发哪些包
-bash scripts/publish-all.sh             # 真发（需要 ~/.npmrc 里有 token）
+# 与 CI 同一条链路，只是最后一步由你在本地执行
+node scripts/release.mjs preflight --tag v0.2.0 --no-ancestry
+node scripts/release.mjs verify --tag v0.2.0
+node scripts/release.mjs publish-check --tag v0.2.0
+npm publish .build/<tarball> --access public   # 本地需要 ~/.npmrc 里的 token
 ```
 
-本地没有 OIDC 身份，只能用 token；这是唯一保留凭据的场景，CI 不使用它。
+本地没有 OIDC 身份，所以最后一步只能用 token；这是唯一保留凭据的场景，CI 不
+使用它，仓库里也不存。同版本同字节时 `publish-check` 会叫你跳过，异字节时会
+直接失败——这两种判断和 CI 完全一致，不要在本地绕过。
 
 ## 自检
 
@@ -66,5 +71,5 @@ bash scripts/publish-all.sh             # 真发（需要 ~/.npmrc 里有 token�
 pnpm run test:release
 ```
 
-覆盖四种情形：工具链低于下限、tag 与包版本不一致、同版本同字节跳过、
+覆盖这些情形：工具链低于下限、tag 与包版本不一致、同版本同字节跳过、
 同版本异字节失败、publish 阶段缺 tarball 时报错而不是重新打包。

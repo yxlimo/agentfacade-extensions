@@ -5,7 +5,10 @@ acceptanceRole: writer
 thinking: high
 inheritSkills: false
 inheritProjectContext: true
-model: buddy/coder-a
+# No `model:` pin on purpose. A provider-qualified model here is resolved at dispatch time, so a
+# stale provider name blocks every dispatch that relies on the default (measured: "Unknown subagent
+# model 'buddy/coder-a'" after the provider was renamed to `agentfacade`). The dispatcher names the
+# model instead; this file owns the permissions, not the model choice.
 # No `tools` here on purpose: a declared tool that never registered is a run error on some hosts, and
 # the edit family's names depend on the host (builtin `edit` vs hashline's replace/insert/...). The
 # permissions block below bounds this child instead.

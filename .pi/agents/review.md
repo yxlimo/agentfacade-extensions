@@ -5,10 +5,15 @@ acceptanceRole: read-only
 thinking: high
 inheritSkills: false
 inheritProjectContext: true
-model: buddy/reviewer-b
+# No `model:` pin — see coder.md: a stale provider-qualified model blocks every dispatch that relies
+# on it. The dispatcher names the model.
 subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
 systemPromptMode: append
 extend:
+  setup:
+    # preExec 在第一次工具调用之前、不经过沙箱跑一次：报告目录由它建出来，写授权才指向一个真实
+    # 路径。目录不存在时这条 write 就是死授权，而这个角色全靠它落报告。
+    preExec: mkdir -p .pi/review-reports
   permissions:
     scope: ["."]
     readOnly: true

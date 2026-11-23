@@ -3,11 +3,12 @@
 // 覆盖「版本不存在 → 发布」「同版本同字节 → 跳过」「同版本异字节 → 失败」三支。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
 	assertToolchain,
@@ -15,6 +16,7 @@ import {
 	compareVersions,
 	fileDigests,
 	publishCheck,
+	registryCheck,
 	ReleaseError,
 	resolveTag,
 } from "./release.mjs";
@@ -23,6 +25,9 @@ import {
 // 下限（实测 GitHub runner 上是 npm 10.9.9），让 publishCheck 读环境里的 npm
 // 会让这几条用例随宿主变化而红——判据没错，是输入不该是环境。
 const TOOLCHAIN = { node: "24.0.0", npm: "11.20.0" };
+
+// 用例自己所在目录：workflow 守卫要沿着它往上找 .github/。
+const SCRIPT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 // ---- 工具链下限 ---------------------------------------------------------------
 test("Node/npm 低于下限时报错，等于或高于则通过", () => {
@@ -185,6 +190,97 @@ test("publish 阶段缺少 tarball 时报错，不重新打包", async () => {
 		await assert.rejects(
 			() => publishCheck({ tag: "v1.2.3", root: fixture.dir, artifactDir: fixture.buildDir, registry: registry.url, toolchain: TOOLCHAIN }),
 			/publish 阶段不允许重新打包/,
+		);
+	} finally {
+		registry.close();
+		rmSync(fixture.dir, { recursive: true, force: true });
+	}
+});
+
+// workflow 的产物目录以点开头（`.build/`），upload-artifact 默认跳过隐藏路径：
+// verify 全过、artifact 空、下游 job 拿不到 tarball，而报错只说「No files were found」。
+test("隐藏的产物目录必须显式允许上传隐藏文件", () => {
+	const workflow = readFileSync(path.join(SCRIPT_ROOT, "..", ".github", "workflows", "publish.yml"), "utf8");
+	const steps = workflow.split("- uses: actions/upload-artifact@").slice(1);
+	assert.ok(steps.length > 0, "publish.yml 里没有 upload-artifact 步骤，这条用例失去意义");
+
+	for (const [index, block] of steps.entries()) {
+		const step = block.split("- uses:")[0];
+		const pathLine = /^\s*path:\s*(\S+)/m.exec(step);
+		assert.ok(pathLine, `第 ${index + 1} 个 upload-artifact 步骤没有 path`);
+		const artifactPath = pathLine[1].replace(/\/+$/, "");
+		const hidden = path.basename(artifactPath).startsWith(".");
+		const allowed = /^\s*include-hidden-files:\s*true\s*$/m.test(step);
+		assert.equal(
+			allowed,
+			hidden,
+			hidden
+				? `产物路径 ${artifactPath} 是隐藏目录，必须 include-hidden-files: true`
+				: `产物路径 ${artifactPath} 不是隐藏目录，别开 include-hidden-files`,
+		);
+	}
+});
+
+// 发布是异步的：npm 打完 `+ pkg@版本` 之后元数据可能还没传播，一次查询会把成功的发布判成失败。
+test("registry 元数据晚到 → 等它出现，不判失败", async () => {
+	const fixture = makeFixture();
+	const metadata = {
+		name: "fixture-pkg",
+		"dist-tags": { latest: "1.2.3" },
+		versions: {
+			"1.2.3": {
+				name: "fixture-pkg",
+				version: "1.2.3",
+				dist: {
+					integrity: fixture.integrity,
+					attestations: { provenance: { url: "https://example.invalid/provenance" } },
+				},
+			},
+		},
+	};
+	let calls = 0;
+	const registry = await startRegistry(() => {
+		calls += 1;
+		return calls < 3 ? null : metadata;
+	});
+	try {
+		const result = await registryCheck({
+			tag: "v1.2.3",
+			root: fixture.dir,
+			artifactDir: fixture.buildDir,
+			registry: registry.url,
+			audit: false,
+			waitMs: 5_000,
+			intervalMs: 5,
+		});
+		assert.equal(result.results.length, 1, "等到之后应当核对通过");
+		assert.ok(calls >= 3, `应当重试到第 3 次，实际查了 ${calls} 次`);
+	} finally {
+		registry.close();
+		rmSync(fixture.dir, { recursive: true, force: true });
+	}
+});
+
+test("registry 始终没有该版本 → 报出等了多久、查了几次", async () => {
+	const fixture = makeFixture();
+	const registry = await startRegistry(() => null);
+	try {
+		await assert.rejects(
+			() =>
+				registryCheck({
+					tag: "v1.2.3",
+					root: fixture.dir,
+					artifactDir: fixture.buildDir,
+					registry: registry.url,
+					audit: false,
+					waitMs: 60,
+					intervalMs: 5,
+				}),
+			(error) => {
+				assert.ok(error instanceof ReleaseError, "必须是面向使用者的失败，而不是崩溃");
+				assert.match(error.message, /不在 registry 上：等了 .* 次仍未生效/);
+				return true;
+			},
 		);
 	} finally {
 		registry.close();

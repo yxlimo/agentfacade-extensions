@@ -7,7 +7,7 @@ inheritSkills: false
 inheritProjectContext: true
 # No `model:` pin — see coder.md: a stale provider-qualified model blocks every dispatch that relies
 # on it. The dispatcher names the model.
-subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
+subagentOnlyExtensions: /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/index.ts, /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/child-context.ts
 systemPromptMode: append
 extend:
   setup:

@@ -12,7 +12,7 @@ inheritProjectContext: true
 # No `tools` here on purpose: a declared tool that never registered is a run error on some hosts, and
 # the edit family's names depend on the host (builtin `edit` vs hashline's replace/insert/...). The
 # permissions block below bounds this child instead.
-subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
+subagentOnlyExtensions: /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/index.ts, /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/child-context.ts
 systemPromptMode: append
 extend:
   permissions:

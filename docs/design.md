@@ -197,6 +197,33 @@ interface ModelSpec {
 - `baseURL` 口径跟着方言变：`openai-completions` 带 `/v1`，`anthropic-messages` 到路由根。
 - `apiKeyEnv` 只写环境变量**名**，密钥本身绝不进配置。
 
+
+## 会话身份头
+
+网关要能区分「哪个会话／哪个子代理」发的请求。这一层只在**出站请求**上加头，不参与 provider 注册，因此与网关是否可达无关：钩子在扩展加载时注册，网关挂了也照样挂上。
+
+共享的是**归一化**，不共享注册方式（每个宿主的注入点各不相同，且头名里有宿主词汇）：
+
+| 位置 | 内容 |
+| --- | --- |
+| `core/session-headers.ts` | `normalizeSessionId` / `normalizeAgentName` / `buildSessionHeaders`。头名由调用方传入，core 不出现任何宿主词汇 |
+| `hosts/*/session-headers.ts` | 各自认识自己的钩子形状与头名 |
+
+三条不变量（都是「写错就静默不生效或弄坏路由」的地方，各有能变红的用例）：
+
+1. **根会话一个头都不写**：有没有父会话是唯一的判据，不是「值解析到了没有」。子会话里父 id 读不到时，子会话自己的 id 照发。
+2. **解析不到就省略，绝不写空值**：空串头表示不了「没解析到」，只会把网关带偏。
+3. **不碰路由头**：pi 的 `x-session-id` / `x-session-affinity` 会被 pi-subagents 改写成父会话 id 用来命中父会话的 prompt cache，覆盖它就是让父会话缓存失效。
+
+各宿主的事实：
+
+| 宿主 | 注入点 | 写的头 | 拿不到的 |
+| --- | --- | --- | --- |
+| pi | `before_provider_headers`（可原地改 `event.headers`）；`before_agent_start` 先记权威 agent 名（`<active_agent name="…">`） | `x-pi-session-id`、`x-parent-session-id`、`x-agent-name` | — （父 id 取自 `sessionManager.getHeader().parentSession` 指向的文件首行，有界读 64KB） |
+| opencode | `ctx.session.hook("model.request")` 改 `event.headers` | 只补 `x-agent-name` | 会话与父会话 id：opencode 原生就发 `x-opencode-session-id` / `x-opencode-parent-session-id`，不重复发 |
+| dsh | cordis 事件 `llm-pi-ai/request-headers`（waterfall） | `x-dsh-session-id` | 父会话 id 与 agent 名：该钩子的上下文只有 `provider/model/sessionId/purpose/baseURL` |
+
+dsh 的两处宿主约束值得记下：它的 provider profile 只有**静态** `headers`（`z.dict(z.string())`），放不下每会话不同的 id，所以必须走请求级钩子；那条 waterfall 的监听器必须**恰好**调一次 `next()`（它代表剩下的监听器，重调会让下游执行两遍），且抛错会让整次调用以 `REQUEST_HEADERS` 失败，所以写头失败只丢这一格头。
 ## 测试契约
 
 - `core`：纯函数 + 一次 fetch，用例注入 fetch，不起网络。

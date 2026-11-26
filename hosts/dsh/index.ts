@@ -10,6 +10,7 @@ import { DEFAULT_API, DEFAULT_API_KEY_ENV, DEFAULT_DISPLAY_NAME, toProviderProfi
 import { DEFAULT_TIMEOUT_MS, resolveDshGateway } from "./gateway-source.ts";
 import { pickNamespace, probeCapabilities, writeProvider, type Capabilities, type SettingsHost } from "./settings-sync.ts";
 
+import { registerSessionHeaders, type DshEventHost } from "./session-headers.ts";
 /** 插件名（cordis 侧显示用） */
 export const name = "agentfacade-models";
 
@@ -33,6 +34,8 @@ export interface DshPluginContext {
   logger?: { info?: (message: string) => void; warn?: (message: string) => void; error?: (message: string) => void };
   /** agent 启动时可以带取消信号；测试构造假的即可 */
   signal?: AbortSignal;
+  /** cordis 的事件注册 API（类型包不在依赖里）；没有就跳过会话头注册，不影响模型同步 */
+  on?: DshEventHost["on"];
 }
 
 /** 插件配置（cordis patch 里 `config:` 那一格）。全部字段都有默认值 */
@@ -236,6 +239,8 @@ export async function syncNow(
  */
 export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState = createState()): Promise<void> {
   state.report = await syncNow(ctx, config, state);
+  // 静态 profile headers 装不下按请求变化的会话 id；钩子拿不到父 id，就只写自己这一格
+  registerSessionHeaders(ctx);
   // 二次 apply（热重载、测试复用同一份 state）不挂第二个定时器
   if (state.poller !== null) return;
   const ids = (): readonly string[] => state.lastGood?.models.map((model) => model.id) ?? [];

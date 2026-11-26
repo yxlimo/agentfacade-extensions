@@ -38,6 +38,7 @@ import type { ModelSpec } from "../../../core/types.ts";
 import { DEFAULT_GATEWAY, DEFAULT_TIMEOUT_MS, resolveDshGateway } from "../gateway-source.ts";
 import type { PollerTimers } from "../../../core/poll.ts";
 
+import { registerSessionHeaders, type DshEventHost, type DshRequestHeadersListener } from "../session-headers.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 let pass = 0;
@@ -1088,6 +1089,109 @@ function modernHost(): FakeHost {
   await apply({ settings: host.settings }, config, state);
   check("二次 apply 不增加定时器，用的还是同一个 poller", clock.scheduled.length === 1 && state.poller === poller, JSON.stringify({ timers: clock.scheduled.length, same: state.poller === poller }));
   check("二次 apply 仍然同步了一次（写了第二次）", host.writes.length === 2, JSON.stringify(host.calls));
+}
+
+{
+  // dsh 的 profile headers 是静态的，按请求变化的 id 只能走事件钩子；注册形状与回调行为一起钉住
+  interface RecordedHook {
+    name: string;
+    listener: DshRequestHeadersListener;
+    options?: { global?: boolean; prepend?: boolean };
+  }
+  function hookCtx(): { ctx: DshEventHost; hooks: RecordedHook[] } {
+    const hooks: RecordedHook[] = [];
+    return {
+      ctx: {
+        on(name, listener, options) {
+          hooks.push({ name, listener, options });
+          return undefined;
+        },
+      },
+      hooks,
+    };
+  }
+
+  const { ctx, hooks } = hookCtx();
+  registerSessionHeaders(ctx);
+  check(
+    "dsh 注册 llm-pi-ai/request-headers（global:true，名字逐字）",
+    hooks.length === 1 && hooks[0]?.name === "llm-pi-ai/request-headers" && same(hooks[0]?.options, { global: true }),
+    JSON.stringify(hooks.map((hook) => ({ name: hook.name, options: hook.options }))),
+  );
+
+  const listener = hooks[0]!.listener;
+  {
+    let nextCalls = 0;
+    const base = new Headers({ "x-existing": "keep" });
+    const out = listener({ sessionId: "  sess\u0007-42  " }, new Headers(), () => {
+      nextCalls++;
+      return base;
+    });
+    check(
+      "会话 id 逐字写入（去空白与控制字符），上游头不动，next 调用一次",
+      nextCalls === 1 && out === base && same([...out.entries()], [["x-dsh-session-id", "sess-42"], ["x-existing", "keep"]]),
+      JSON.stringify({ nextCalls, headers: [...out.entries()] }),
+    );
+  }
+  {
+    let nextCalls = 0;
+    const base = new Headers();
+    const out = listener({}, new Headers(), () => {
+      nextCalls++;
+      return base;
+    });
+    check("没有 sessionId 时不写头，next 仍然调用一次", nextCalls === 1 && out === base && same([...out.entries()], []), JSON.stringify({ nextCalls, headers: [...out.entries()] }));
+  }
+  {
+    let nextCalls = 0;
+    const boom = new Headers();
+    Object.defineProperty(boom, "set", {
+      value: () => {
+        throw new Error("headers.set failed");
+      },
+    });
+    let thrown: unknown = null;
+    let out: Headers | null = null;
+    try {
+      out = listener({ sessionId: "sess-1" }, new Headers(), () => {
+        nextCalls++;
+        return boom;
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      "写头抛错时只丢这一格头：不抛、next 仍只调用一次（重调 next 会让下游监听器跑两遍）",
+      thrown === null && nextCalls === 1 && out === boom,
+      JSON.stringify({ thrown: thrown === null ? null : String(thrown), nextCalls, headers: out === null ? null : [...out.entries()] }),
+    );
+  }
+  {
+    let thrown: unknown = null;
+    try {
+      registerSessionHeaders({});
+      registerSessionHeaders({ on: undefined });
+    } catch (error) {
+      thrown = error;
+    }
+    check("ctx 没有 on 时安静跳过", thrown === null, String(thrown));
+  }
+  {
+    // 集成：只测导出的钩子函数抓不到「apply 忘了接线」，这里从真实入口再走一遍
+    const { ctx: eventHost, hooks: applyHooks } = hookCtx();
+    const host = modernHost();
+    const feed = captureAuthFetch(() => jsonResponse(SEEDED));
+    const clock = fakeClock();
+    const ctx = { settings: host.settings, on: eventHost.on };
+    await apply(ctx, configWith(feed.fetchImpl, { home: tempHome(), timers: clock.timers }), createState());
+    check(
+      "apply 在 dsh ctx 上注册了请求头钩子",
+      applyHooks.length === 1 && applyHooks[0]?.name === "llm-pi-ai/request-headers",
+      JSON.stringify(applyHooks.map((hook) => hook.name)),
+    );
+    const out = applyHooks[0]?.listener({ sessionId: "sess-apply" }, new Headers(), () => new Headers());
+    check("apply 接上的钩子发出会话头（逐字）", same(out && [...out.entries()], [["x-dsh-session-id", "sess-apply"]]), JSON.stringify(out && [...out.entries()]));
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

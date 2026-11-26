@@ -14,24 +14,31 @@ import { toPiModelEntry, toProviderConfig, type PiModelEntry, type PiProviderCon
 import { DEFAULT_TIMEOUT_MS, NO_GATEWAY_HINT, resolveGateway } from "./gateway-config.ts";
 import { runProbe } from "./probe.ts";
 
+import {
+	registerSessionHeaderHooks,
+	type AgentStartEvent,
+	type HookContextLike,
+	type ProviderHeaderEvent,
+} from "./session-headers.ts";
 /** provider 名：独立名字，不与 models.json 里可能存在的条目撞名 */
 export const PROVIDER_NAME = "agentfacade";
 
 /** 网关跑 public 模式时不校验 key */
 export const API_KEY = "public";
 
-/** 不 import @earendil-works/pi-coding-agent 的类型：那个包不在本仓依赖里，只声明自己用到的两个方法 */
 export interface PiExtensionApi {
-  registerProvider(name: string, config: PiProviderConfig & { refreshModels?: RefreshModels }): void;
-  registerCommand(
-    name: string,
-    options: {
-      description?: string;
-      handler: (args: string, ctx: CommandContext) => Promise<void> | void;
-    },
-  ): void;
+	registerProvider(name: string, config: PiProviderConfig & { refreshModels?: RefreshModels }): void;
+	registerCommand(
+		name: string,
+		options: {
+			description?: string;
+			handler: (args: string, ctx: CommandContext) => Promise<void> | void;
+		},
+	): void;
+	// 本机 pi 的类型包不在本仓依赖里；这里按任务给的事件形状声明，钩子存在性仍需上级核实
+	on(name: "before_agent_start", handler: (event: AgentStartEvent, ctx: HookContextLike) => void): void;
+	on(name: "before_provider_headers", handler: (event: ProviderHeaderEvent, ctx: HookContextLike) => void): void;
 }
-
 /** 命令里要用到的那一格；pi 真的 ctx 比这个宽得多 */
 export interface CommandContext {
   ui?: { notify?: (message: string, level?: string) => void };
@@ -160,6 +167,8 @@ export function describe(state: PluginState): string[] {
 /** async 工厂：pi 会等它返回再继续启动，所以这里拉到的模型对启动时的模型选择都有效 */
 export default async function facadeModels(pi: PiExtensionApi, options: PluginOptions = {}): Promise<void> {
   const warn = options.warn ?? ((message: string) => console.warn(`${PREFIX} ${message}`));
+  // 会话头与网关是否可达无关：即使这一轮没注册 provider，钩子也要在
+  registerSessionHeaderHooks(pi);
   const state: PluginState = {
     gateway: "",
     from: "",

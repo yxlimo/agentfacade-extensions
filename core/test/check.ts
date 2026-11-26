@@ -43,6 +43,12 @@ import { syncCatalog, type SyncDeps, type SyncState } from "../sync.ts";
 import { probeModels, probePlan, type ProbeResult } from "../probe.ts";
 import type { HostAdapter, ModelSpec } from "../types.ts";
 
+import {
+	buildSessionHeaders,
+	normalizeAgentName,
+	normalizeSessionId,
+	type SessionHeaderNames,
+} from "../session-headers.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CORE_DIR = path.join(HERE, "..");
 
@@ -1802,6 +1808,57 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
   );
 }
 
+// ── 会话头：core 只管归一化与「有父才写」 ────────────────────────────────
+console.log("");
+console.log("会话头（归一化与子会话门槛，头名由调用方给）");
+
+const HEADER_NAMES: SessionHeaderNames = {
+	session: "x-own-session",
+	parent: "x-parent-session",
+	agent: "x-agent-name",
+};
+
+check(
+	"会话 id：trim → 去控制字符 → 截断到 128（顺序按契约，不是先截断再洗）",
+	same(normalizeSessionId(`  pi/sess-1\u0000\u001f\u007f-v2  `), "pi/sess-1-v2") &&
+		normalizeSessionId("a".repeat(200)) === "a".repeat(128),
+	JSON.stringify(normalizeSessionId(`  pi/sess-1\u0000\u001f\u007f-v2  `)),
+);
+check(
+	"会话 id 全是空白 / 控制字符 / 非字符串 → 未解析（null，不是空串）",
+	same([normalizeSessionId(" \t\r\n "), normalizeSessionId("\u0000\u007f"), normalizeSessionId(42), normalizeSessionId(null)], [null, null, null, null]),
+	JSON.stringify([normalizeSessionId(" \t\r\n "), normalizeSessionId("\u0000\u007f")]),
+);
+check(
+	"名字只留 [A-Za-z0-9._-]，空则省略，超长截断到 64",
+	same(normalizeAgentName("  coder.v2_a-b  "), "coder.v2_a-b") &&
+		same(normalizeAgentName("coder!! /中文 name"), "codername") &&
+		same(normalizeAgentName("/\\!?"), null) &&
+		normalizeAgentName("z".repeat(100)) === "z".repeat(64),
+	JSON.stringify([normalizeAgentName("coder!! /中文 name"), normalizeAgentName("z".repeat(100))?.length]),
+);
+check(
+	"有父会话：只写解析成功的头，逐字三格（父 id 读不到也保留子会话自己的 id）",
+	same(buildSessionHeaders(HEADER_NAMES, { hasParent: true, sessionId: "  child-1  ", parentSessionId: "parent-9", agentName: "coder.a" }), {
+		"x-own-session": "child-1",
+		"x-parent-session": "parent-9",
+		"x-agent-name": "coder.a",
+	}),
+	JSON.stringify(buildSessionHeaders(HEADER_NAMES, { hasParent: true, sessionId: "child-1", parentSessionId: "parent-9", agentName: "coder.a" })),
+);
+check(
+	"父会话 id 与名字都未解析 → 只有子会话 id，绝不写空值 / 编造父 id",
+	same(buildSessionHeaders(HEADER_NAMES, { hasParent: true, sessionId: "child-2", parentSessionId: "", agentName: "!!!" }), {
+		"x-own-session": "child-2",
+	}),
+	JSON.stringify(buildSessionHeaders(HEADER_NAMES, { hasParent: true, sessionId: "child-2", parentSessionId: "", agentName: "!!!" })),
+);
+check(
+	"根会话（没有父会话）一个头都不写，哪怕三个值都在",
+	same(buildSessionHeaders(HEADER_NAMES, { hasParent: false, sessionId: "root-1", parentSessionId: "ignored", agentName: "coder" }), {}),
+	JSON.stringify(buildSessionHeaders(HEADER_NAMES, { hasParent: false, sessionId: "root-1", parentSessionId: "ignored", agentName: "coder" })),
+);
+
 // ── 归属规则：core 里不许出现 agent 词汇 ─────────────────────────────────────
 
 console.log("");
@@ -1824,7 +1881,7 @@ console.log("core 的归属规则（禁用词扫描）");
   // capabilities.tools），catalog.ts 必须读它；但它出现在别的 core 文件里、或以 `capabilities:` 的
   // key 位置出现，就说明 agent 的形状漏进了契约。下面那条 key 位置断言是这条口子的补偿。
   const PAYLOAD_ONLY = "capabilities";
-  const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts", "gateway-config.ts", "auth.ts", "poll.ts", "probe.ts"];
+  const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts", "gateway-config.ts", "auth.ts", "poll.ts", "probe.ts", "session-headers.ts"];
   // 「agentfacade」是工具链自己的目录名/项名：gateway-config.ts 里只许出现在 config.json 路径上，
   // auth.ts 整份文件管的就是 auth.json（路径、项名、报错文案全是它）。
   // 其它文件出现一次就算越界。
@@ -1848,10 +1905,10 @@ console.log("core 的归属规则（禁用词扫描）");
     if (file !== "catalog.ts" && text.includes(PAYLOAD_ONLY)) hits.push(`${file}: ${PAYLOAD_ONLY}`);
     if (/(^|[\s,{])capabilities\s*:/m.test(text)) keyHits.push(file);
   }
-  check("core 的八个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
+  check("core 的九个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
   check("capabilities 只在读报文的位置，没变成我们自己的字段名", keyHits.length === 0, JSON.stringify(keyHits));
   check(
-    "扫描确实读到了八个源文件（不然上一行永远绿）",
+    "扫描确实读到了九个源文件（不然上一行永远绿）",
     files.every((file) => fs.existsSync(path.join(CORE_DIR, file))),
     JSON.stringify(files),
   );

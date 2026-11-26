@@ -34,6 +34,13 @@ import type { PollerTimers } from "../../../core/poll.ts";
 import type { ModelSpec } from "../../../core/types.ts";
 import { resolveGateway } from "../gateway-config.ts";
 import { EXPECTED as EXPECTED_SNAPSHOT } from "../fixtures/expected.ts";
+import {
+	createParentSessionIdResolver,
+	readFirstLineSync,
+	type AgentStartEvent,
+	type HookContextLike,
+	type ProviderHeaderEvent,
+} from "../session-headers.ts";
 import { startFakeUpstream, type CapturedRequest } from "./fake-upstream.ts";
 
 // 线上用例的对象：真的 pi-ai（1.5.2，与 pi 同版钉死）的 anthropic-messages 适配器。
@@ -469,6 +476,10 @@ interface Captured {
   command: { name: string; handler: (args: string, ctx: unknown) => Promise<void> } | null;
   /** /agentfacade 与别名 /facade-models 各注册一条；command 保留最后一条，旧用例不用改 */
   commands: Array<{ name: string; handler: (args: string, ctx: unknown) => Promise<void> }>;
+  hooks: {
+    beforeAgentStart?: (event: AgentStartEvent, ctx: HookContextLike) => void;
+    beforeProviderHeaders?: (event: ProviderHeaderEvent, ctx: HookContextLike) => void;
+  };
 }
 
 function fakePi(): PiExtensionApi & Captured {
@@ -477,6 +488,7 @@ function fakePi(): PiExtensionApi & Captured {
     registrations: [],
     command: null,
     commands: [],
+    hooks: {},
     registerProvider(name, config) {
       captured.provider = { name, config };
       captured.registrations.push({ name, config });
@@ -485,6 +497,10 @@ function fakePi(): PiExtensionApi & Captured {
       const entry = { name, handler: options.handler as (args: string, ctx: unknown) => Promise<void> };
       captured.commands.push(entry);
       captured.command = entry;
+    },
+    on(name, handler) {
+      if (name === "before_agent_start") captured.hooks.beforeAgentStart = handler as (event: AgentStartEvent, ctx: HookContextLike) => void;
+      if (name === "before_provider_headers") captured.hooks.beforeProviderHeaders = handler as (event: ProviderHeaderEvent, ctx: HookContextLike) => void;
     },
   } as PiExtensionApi & Captured;
   return captured;
@@ -1482,5 +1498,183 @@ type AdaptiveBody = {
   );
 }
 console.log("");
+// ── 子代理会话头：pi 钩子 + 父会话首行 ─────────────────────────────────
+//
+// 这里的父会话是临时文件，钩子由真正的工厂注册；只读本地文件，不碰用户会话目录。
+console.log("");
+console.log("子代理会话头（pi 钩子，父会话首行）");
+
+const PARENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-headers-"));
+const UUID_PARENT = path.join(PARENT_DIR, "2026-01-01_11111111-2222-3333-4444-555555555555.jsonl");
+const BAD_PARENT = path.join(PARENT_DIR, "2026-01-01_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+const PLAIN_PARENT = path.join(PARENT_DIR, "plain.jsonl");
+const CACHE_PARENT = path.join(PARENT_DIR, "cache.jsonl");
+fs.writeFileSync(UUID_PARENT, '{"id":"parent-first-line","type":"session"}\n{"id":"parent-second-line"}\n');
+fs.writeFileSync(BAD_PARENT, "{ not json\n");
+fs.writeFileSync(PLAIN_PARENT, "{ not json\n");
+fs.writeFileSync(CACHE_PARENT, '{"id":"cached-first"}\n');
+
+check(
+	"只读父会话首行（第二行也有 id 时不能覆盖）",
+	readFirstLineSync(UUID_PARENT) === '{"id":"parent-first-line","type":"session"}',
+	JSON.stringify(readFirstLineSync(UUID_PARENT)),
+);
+check(
+	"父会话路径 → 首行 JSON 的 id 是权威，不是文件名里的 uuid",
+	createParentSessionIdResolver().resolve(UUID_PARENT) === "parent-first-line",
+	String(createParentSessionIdResolver().resolve(UUID_PARENT)),
+);
+check(
+	"首行坏 JSON → 文件名 uuid（逐字，大小写原样）",
+	createParentSessionIdResolver().resolve(BAD_PARENT) === "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+	String(createParentSessionIdResolver().resolve(BAD_PARENT)),
+);
+check(
+	"首行坏 JSON 且文件名没有 uuid → 父 id 未解析（null）",
+	createParentSessionIdResolver().resolve(PLAIN_PARENT) === null,
+	String(createParentSessionIdResolver().resolve(PLAIN_PARENT)),
+);
+{
+	let reads = 0;
+	const cached = createParentSessionIdResolver(() => {
+		reads++;
+		return '{"id":"cached-first"}';
+	});
+	const first = cached.resolve(CACHE_PARENT);
+	fs.writeFileSync(CACHE_PARENT, '{"id":"cached-changed"}\n');
+	const second = cached.resolve(CACHE_PARENT);
+	check(
+		"按路径缓存命中：第二次不读文件，仍返回第一次的 id",
+		first === "cached-first" && second === "cached-first" && reads === 1,
+		JSON.stringify({ first, second, reads }),
+	);
+}
+
+const hookPi = fakePi();
+const offlineFetch = (async () => {
+	throw new Error("offline");
+}) as unknown as typeof fetch;
+await facadeModels(hookPi, {
+	env: {},
+	home: tempHome(),
+	warn: () => {},
+	fetchOptions: { fetchImpl: offlineFetch },
+});
+check(
+	"工厂挂上 before_agent_start 与 before_provider_headers（与网关是否可达无关）",
+	typeof hookPi.hooks.beforeAgentStart === "function" && typeof hookPi.hooks.beforeProviderHeaders === "function",
+	JSON.stringify(Object.keys(hookPi.hooks)),
+);
+
+interface HeaderCtxOptions {
+	sessionId?: string;
+	sessionName?: string;
+	cwd?: string;
+}
+function headerCtx(parentSession: string | null, opts: HeaderCtxOptions = {}): HookContextLike {
+	return {
+		sessionManager: {
+			getHeader: () => (parentSession === null ? {} : { parentSession }),
+			getSessionId: () => opts.sessionId ?? "child-default",
+			getSessionFile: () => path.join(PARENT_DIR, "child.jsonl"),
+			getSessionName: () => opts.sessionName ?? "",
+			getCwd: () => opts.cwd ?? PARENT_DIR,
+		},
+	};
+}
+function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Record<string, string> {
+	const event: ProviderHeaderEvent = { headers: initial };
+	hookPi.hooks.beforeProviderHeaders?.(event, ctx);
+	return initial;
+}
+
+{
+	const ctx = headerCtx(UUID_PARENT, { sessionId: " child-session-id ", sessionName: "not-an-agent" });
+	const start: AgentStartEvent = { systemPrompt: 'you are helpful\n<active_agent name="coder-one">\n...' };
+	hookPi.hooks.beforeAgentStart?.(start, ctx);
+	const reserved = { "x-session-id": "pi-parent-cache", "x-session-affinity": "pi-parent-cache" };
+	const headers = sendHeaders(ctx, { ...reserved });
+	check(
+		"子会话三头逐字；pi / pi-subagents 的路由头保持父会话值（覆盖会破坏 prompt cache）",
+		same(headers, {
+			...reserved,
+			"x-pi-session-id": "child-session-id",
+			"x-parent-session-id": "parent-first-line",
+			"x-agent-name": "coder-one",
+		}),
+		JSON.stringify(headers),
+	);
+}
+{
+	const ctx = headerCtx(null, { sessionId: "root-1", sessionName: "coder-root" });
+	hookPi.hooks.beforeAgentStart?.({ systemPrompt: '<active_agent name="ignored">' }, ctx);
+	const headers = sendHeaders(ctx, { "x-session-id": "pi-root", "x-session-affinity": "pi-root" });
+	check(
+		"根会话一个头都不写（有 agent 名也不写）—— 只由 parentSession 决定",
+		same(headers, { "x-session-id": "pi-root", "x-session-affinity": "pi-root" }),
+		JSON.stringify(headers),
+	);
+}
+{
+	const ctx = headerCtx(UUID_PARENT, { sessionId: "child-2", sessionName: "coder.two" });
+	const headers = sendHeaders(ctx, {});
+	check(
+		"没有权威标记 → 会话名像 agent 名时逐字写入（两级回退）",
+		same(headers, {
+			"x-pi-session-id": "child-2",
+			"x-parent-session-id": "parent-first-line",
+			"x-agent-name": "coder.two",
+		}),
+		JSON.stringify(headers),
+	);
+}
+{
+	const ctx = headerCtx(UUID_PARENT, { sessionId: "child-3", sessionName: "会话 名称" });
+	const headers = sendHeaders(ctx, {});
+	check(
+		"会话名不像 agent 名 → 省略 x-agent-name，但子/父 id 照写",
+		same(headers, {
+			"x-pi-session-id": "child-3",
+			"x-parent-session-id": "parent-first-line",
+		}) && !Object.hasOwn(headers, "x-agent-name"),
+		JSON.stringify(headers),
+	);
+}
+{
+	const ctx = headerCtx(PLAIN_PARENT, { sessionId: "child-4", sessionName: "coder" });
+	const headers = sendHeaders(ctx, {});
+	check(
+		"父 id 解析失败 → 不写父头，也不把整个子会话头一起丢掉",
+		same(headers, { "x-pi-session-id": "child-4", "x-agent-name": "coder" }),
+		JSON.stringify(headers),
+	);
+}
+{
+	const ctx = headerCtx(path.basename(UUID_PARENT), { cwd: PARENT_DIR, sessionId: "child-5", sessionName: "coder" });
+	const headers = sendHeaders(ctx, {});
+	check(
+		"parentSession 是相对路径时按 getCwd 解析，仍读到首行 id",
+		same(headers, {
+			"x-pi-session-id": "child-5",
+			"x-parent-session-id": "parent-first-line",
+			"x-agent-name": "coder",
+		}),
+		JSON.stringify(headers),
+	);
+}
+{
+	const broken: HookContextLike = {
+		sessionManager: {
+			getHeader() {
+				throw new Error("header exploded");
+			},
+			getSessionId: () => "child-6",
+			getSessionName: () => "coder",
+		},
+	};
+	const headers = sendHeaders(broken, { "x-session-id": "keep" });
+	check("sessionManager 抛错被吞掉，原有请求头不动、不抛", same(headers, { "x-session-id": "keep" }), JSON.stringify(headers));
+}
+
 console.log(fail === 0 ? `全部通过（${pass} 条）` : `${fail} 条失败，${pass} 条通过`);
 process.exit(fail === 0 ? 0 : 1);

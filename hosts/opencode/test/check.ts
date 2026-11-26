@@ -10,6 +10,7 @@
 //   · 空清单绝不替换上一次的清单（core 的状态机，从这一侧也钉一遍）
 //   · 网关地址：OPENCODE_FACADE_GATEWAY > FACADE_GATEWAY > 配置文件 > 默认
 //   · 归属规则：这一层不碰网关协议，也没有任何写文件的 API
+//   · 会话身份头：model.request 补 x-agent-name（逐字写入、解析不到不写、不动原生头、异常吞掉）
 //
 // 全部离线：网络用注入的 fetch 伪造（不起端口、不连真网关），配置文件用临时主目录。
 // 期望值一律手写并逐字比对，不写「是对象」「是数组」这种断言 —— 那种断言在映射改坏后照样绿。
@@ -39,6 +40,7 @@ import {
   resolveGateway,
 } from "../gateway-config.ts";
 import { EXPECTED } from "../fixtures/expected.ts";
+import { registerSessionHeaders } from "../session-headers.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST_DIR = path.join(HERE, "..");
@@ -1107,6 +1109,204 @@ check("超时预算是 1500ms（启动路径上被 await 的那个数）", DEFAU
   check("空的 agent 变量被跳过，落到 FACADE_GATEWAY", same(calls.map(listTarget), ["http://facade.example:6450/v1/models"]), JSON.stringify(calls));
 }
 
+// ── 会话身份头：model.request 上补 x-agent-name ──────────────────────────────
+//
+// opencode 原生发会话与父会话头，本层只补 agent 名。钩子入口用假 ctx 注入、handler 手动触发，
+// 断言 headers 对象逐字 —— 头名与值都写死成字面量，实现改坏时这一节必须红。
+
+console.log("");
+console.log("会话身份头（model.request，x-agent-name）");
+
+/** model.request 事件的形状：与 index.ts 里 OpencodeV2Context.session 的声明一致 */
+type ModelRequestEvent = {
+  headers: Record<string, string | null>;
+  agent?: unknown;
+  sessionID?: unknown;
+};
+
+/** 假 session.hook：记下交进来的 handler 与钩子名，供测试手动触发 */
+function fakeSessionHook(): {
+  session: NonNullable<OpencodeV2Context["session"]>;
+  handlers: Array<(event: ModelRequestEvent) => void>;
+  hookNames: string[];
+} {
+  const handlers: Array<(event: ModelRequestEvent) => void> = [];
+  const hookNames: string[] = [];
+  const session: NonNullable<OpencodeV2Context["session"]> = {
+    async hook(name, handler) {
+      hookNames.push(String(name));
+      handlers.push(handler);
+      return { dispose() {} };
+    },
+  };
+  return { session, handlers, hookNames };
+}
+
+/** 最小 OpencodeV2Context：会话头逻辑只读 session 一格，provider 一格用空实现顶住类型 */
+function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Context {
+  const ctx: OpencodeV2Context = {
+    provider: { async transform() {} },
+  };
+  if (session !== undefined) ctx.session = session;
+  return ctx;
+}
+
+{
+  const { session, handlers } = fakeSessionHook();
+  await registerSessionHeaders(ctxWithSession(session));
+  const headers: Record<string, string | null> = {};
+  handlers[0]({ headers, agent: "coder-bot" });
+  check("agent 解析到 → x-agent-name 逐字写入", same(headers, { "x-agent-name": "coder-bot" }), brief(headers));
+}
+
+{
+  // 非法字符（含中文）被 core 的归一化削掉：这一格钉的是「值过 normalizeAgentName」，
+  // 而不是只做 typeof 判断 —— 直接拿 event.agent 写的话这个用例会红
+  const { session, handlers } = fakeSessionHook();
+  await registerSessionHeaders(ctxWithSession(session));
+  const headers: Record<string, string | null> = {};
+  handlers[0]({ headers, agent: "代码 agent.v2" });
+  check("非法字符被削 → 写削净后的逐字结果", same(headers, { "x-agent-name": "agent.v2" }), brief(headers));
+}
+
+{
+  const { session, hookNames } = fakeSessionHook();
+  await registerSessionHeaders(ctxWithSession(session));
+  check("钩子名是 model.request", same(hookNames, ["model.request"]), JSON.stringify(hookNames));
+}
+
+{
+  // 解析不到：空头表示不了「没解析到」，只能一个都不写。用 hasOwn 判，不靠真值 ——
+  // 空串与「没写」必须分开，混了就是把「没解析到」悄悄变成了空头
+  for (const agent of [undefined, "", "///", 42] as const) {
+    const { session, handlers } = fakeSessionHook();
+    await registerSessionHeaders(ctxWithSession(session));
+    const headers: Record<string, string | null> = {};
+    handlers[0]({ headers, agent });
+    check(
+      `agent 解析不到（${JSON.stringify(agent) ?? "undefined"}）→ 不写头`,
+      !Object.hasOwn(headers, "x-agent-name") && Object.keys(headers).length === 0,
+      brief(headers),
+    );
+  }
+}
+
+{
+  // 原生会话头是 opencode 运行时的：本层只加不减，解析不到时也一个都不许改
+  const { session, handlers } = fakeSessionHook();
+  await registerSessionHeaders(ctxWithSession(session));
+  const headers: Record<string, string | null> = {
+    "x-opencode-session-id": "sess-9",
+    "x-opencode-parent-session-id": "parent-9",
+  };
+  handlers[0]({ headers, agent: "///" });
+  check(
+    "解析不到 → 不写 x-agent-name，也不动已有的 x-opencode-* 头",
+    same(headers, { "x-opencode-session-id": "sess-9", "x-opencode-parent-session-id": "parent-9" }),
+    brief(headers),
+  );
+}
+
+{
+  // 写入时抛错（真机上 headers 形状不合规就是这种）：必须吞掉，不能变成模型请求失败
+  const { session, handlers } = fakeSessionHook();
+  await registerSessionHeaders(ctxWithSession(session));
+  const headers = new Proxy({} as Record<string, string | null>, {
+    set() {
+      throw new Error("header write failed");
+    },
+  });
+  let thrown: unknown = null;
+  try {
+    handlers[0]({ headers, agent: "coder" });
+  } catch (error) {
+    thrown = error;
+  }
+  check("handler 写入抛错 → 被吞，不外抛", thrown === null, String(thrown));
+}
+
+{
+  // hook 注册本身失败：同样吞掉，setup 的其余流程照走
+  const brokenSession = {
+    async hook() {
+      throw new Error("hook registration failed");
+    },
+  } as unknown as NonNullable<OpencodeV2Context["session"]>;
+  let thrown: unknown = null;
+  try {
+    await registerSessionHeaders(ctxWithSession(brokenSession));
+  } catch (error) {
+    thrown = error;
+  }
+  check("hook 注册抛错 → 被吞，不外抛", thrown === null, String(thrown));
+}
+
+{
+  let thrown: unknown = null;
+  try {
+    await registerSessionHeaders(ctxWithSession(undefined));
+  } catch (error) {
+    thrown = error;
+  }
+  check("没有 ctx.session → 安静跳过，注册流程照常完成", thrown === null, String(thrown));
+}
+
+{
+  // 集成路径：setup 真的把钩子注册进去（不只直接调 registerSessionHeaders），
+  // 且带 session 时 provider 注册不受影响
+  const { session, handlers } = fakeSessionHook();
+  const { impl } = captureFetch(() => jsonResponse(ONE_LISTED));
+  const { ctx, added } = fakeContext();
+  ctx.session = session;
+  const warnings: string[] = [];
+  await setup(ctx, {
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY },
+    home: tempHome(),
+    fetchOptions: { fetchImpl: impl },
+    warn: (message: string) => warnings.push(message),
+  });
+  check("setup 把 model.request 钩子注册了一次", handlers.length === 1, String(handlers.length));
+  check("带 session 时 provider 照常注册一次", added.length === 1, String(added.length));
+  const headers: Record<string, string | null> = {
+    "x-opencode-session-id": "sess-1",
+    "x-opencode-parent-session-id": "parent-1",
+  };
+  handlers[0]({ headers, agent: "coder", sessionID: "sess-1" });
+  check(
+    "真实触发：补 x-agent-name，x-opencode-* 头逐字不动",
+    same(headers, {
+      "x-opencode-session-id": "sess-1",
+      "x-opencode-parent-session-id": "parent-1",
+      "x-agent-name": "coder",
+    }),
+    brief(headers),
+  );
+}
+
+{
+  // 会话头与网关是否可达无关：拉不到清单时 provider 不注册（只警告一条），
+  // 但 model.request 钩子必须已经挂上 —— 否则子会话的 agent 名永远发不出去，
+  // 而这条缺失在「成功路径」的用例里完全看不出来。
+  const { session, handlers } = fakeSessionHook();
+  const { impl } = captureFetch(() => {
+    throw new Error("connect ECONNREFUSED 127.0.0.1:6450");
+  });
+  const { ctx, added } = fakeContext();
+  ctx.session = session;
+  const warnings: string[] = [];
+  await setup(ctx, {
+    env: { OPENCODE_FACADE_GATEWAY: GATEWAY },
+    home: tempHome(),
+    fetchOptions: { fetchImpl: impl },
+    warn: (message: string) => warnings.push(message),
+  });
+  check("网关不可达时 provider 不注册", added.length === 0, String(added.length));
+  check("网关不可达时钩子仍然注册（会话头与网关可达性无关）", handlers.length === 1, String(handlers.length));
+  const headers: Record<string, string | null> = {};
+  handlers[0]?.({ headers, agent: "coder" });
+  check("网关不可达时钩子照样写得出 x-agent-name", same(headers, { "x-agent-name": "coder" }), brief(headers));
+}
+
 // ── 插件导出形状 + 归属规则 ───────────────────────────────────────────────
 
 console.log("");
@@ -1121,10 +1321,9 @@ check(
 check("默认导出没有 v1 遗留的 server 一格", !("server" in plugin), brief(Object.keys(plugin)));
 
 {
-  const SOURCES = ["catalog.ts", "v2.ts", "gateway-config.ts", "index.ts"];
+  const SOURCES = ["catalog.ts", "v2.ts", "gateway-config.ts", "index.ts", "session-headers.ts"];
   const files = SOURCES.map((name) => path.join(HOST_DIR, name));
-  check("四个源文件都在", files.every((file) => fs.existsSync(file)), JSON.stringify(SOURCES));
-
+  check("五个源文件都在", files.every((file) => fs.existsSync(file)), JSON.stringify(SOURCES));
   // 网关协议与 core 的归一化词汇不属于 agent 层：这一层只接收 ModelSpec[]
   const PROTOCOL = ["/v1/models", "context_window", "max_output_tokens", "display_name", "effort_options", "fetch("];
   const protocolHits: string[] = [];

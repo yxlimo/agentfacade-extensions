@@ -10,6 +10,7 @@ import { startCatalogPolling, type PollerTimers } from "../../core/poll.ts";
 import { API_KEY, PROVIDER_ID } from "./catalog.ts";
 import { DEFAULT_PACKAGE, toV2Payload, type OpencodeV2Payload } from "./v2.ts";
 import { DEFAULT_TIMEOUT_MS, NO_GATEWAY_HINT, resolveGateway } from "./gateway-config.ts";
+import { registerSessionHeaders } from "./session-headers.ts";
 
 const PREFIX = "[facade-models]";
 
@@ -108,6 +109,21 @@ export interface OpencodeV2Context {
     /** v2 的域刷新；本插件不调它（周期刷新走 core 轮询 + transform 重新 add），声明它只是为了让调用方知道它存在 */
     reload?(): Promise<void>;
   };
+  /**
+   * 会话钩子面：由 opencode 运行时注入。它的类型包不在本仓依赖里，这里只声明用到的那一格，
+   * 形状照上游运行时（2.2.7 实测）：model.request 事件的 headers 可直接改。opencode 原生就发
+   * 会话与父会话头，本插件只用它补 x-agent-name，那两个头一个都不碰。
+   */
+  session?: {
+    hook(
+      name: "model.request",
+      handler: (event: {
+        headers: Record<string, string | null>;
+        agent?: unknown;
+        sessionID?: unknown;
+      }) => void,
+    ): Promise<unknown>;
+  };
 }
 
 /** 失败一律不注册，用户原有 providers 继续生效。没有「已经注册过」这种记忆，所以文案只说这次 */
@@ -117,6 +133,9 @@ export async function setup(
 ): Promise<void> {
   const state = freshState();
   const warn = options.warn ?? ((message: string) => process.stderr.write(`${PREFIX} ${message}\n`));
+  // 会话身份头与网关是否可达无关：即使这一轮拉不到清单、provider 没注册，钩子也要在；
+  // 钩子注册失败由 session-headers.ts 吞掉，绝不连带 provider 注册。
+  await registerSessionHeaders(ctx);
 
   const result = await refresh(state, options);
   if (!result.ok) {

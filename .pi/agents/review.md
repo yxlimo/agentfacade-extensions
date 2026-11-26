@@ -7,7 +7,6 @@ inheritSkills: false
 inheritProjectContext: true
 # No `model:` pin — see coder.md: a stale provider-qualified model blocks every dispatch that relies
 # on it. The dispatcher names the model.
-subagentOnlyExtensions: /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/index.ts, /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/child-context.ts
 systemPromptMode: append
 extend:
   setup:
@@ -21,9 +20,7 @@ extend:
     # readOnly 默认写范围为空；同层显式 write 优先 —— 全树唯一写授权就是报告目录
     write: [".pi/review-reports"]
     bash:
-      writable: false
       network: false
-      dependencyGate: false
       allow:
         - git status
         - git diff
@@ -40,7 +37,6 @@ extend:
         - find
         - grep
         - node
-        - sh
         - test
         # 报告里的证据要自己跑出来：允许本仓库的门槛命令
         - pnpm run test:core

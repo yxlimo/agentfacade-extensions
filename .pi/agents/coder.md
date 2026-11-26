@@ -12,14 +12,20 @@ inheritProjectContext: true
 # No `tools` here on purpose: a declared tool that never registered is a run error on some hosts, and
 # the edit family's names depend on the host (builtin `edit` vs hashline's replace/insert/...). The
 # permissions block below bounds this child instead.
-subagentOnlyExtensions: /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/index.ts, /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/child-context.ts
 systemPromptMode: append
 extend:
+  worktree:
+    enabled: true
+    # pi-subagents 会把仓库根的 node_modules 软链进工作树。pnpm 12 的 verify-deps-before-run 把软链
+    # 判成 stale，第一次门禁就去装依赖；沙箱无网，每个包「Will retry in 1m」，实测挂死半小时零输出。
+    nodeModules: remove
+  setup:
+    # preExec 在沙箱外、有网跑一次：实装依赖（冻结 lockfile + 预热 store，实测 0.2 秒）。
+    preExec: pnpm install --frozen-lockfile --prefer-offline
   permissions:
     scope: ["."]
     write: ["."]
     bash:
-      writable: true
       network: false
       allow:
         # 只读检视：读 git 状态与文件内容，不产生任何写
@@ -39,8 +45,6 @@ extend:
         - wc
         - echo
         - node
-        - python3
-        - sh
         # 真上游验证，只读：不发请求、不写任何上游配置
         - opencode --version
         - opencode models
@@ -60,7 +64,6 @@ extend:
         - mv
         - rm
         - touch
-        - npx
         - pnpm install --prefer-offline
       deny:
         # 九条地板，一字不改：任何 git 写操作与递归删除都进不来

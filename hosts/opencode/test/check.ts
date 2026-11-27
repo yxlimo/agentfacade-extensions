@@ -5,6 +5,8 @@
 // 覆盖这些块：
 //   · 映射：ModelSpec → v2 的 `Model.Info`；整份清单 → `editor.add()` 的入参。期望值里有手写快照
 //     （fixtures/expected.ts），由 SNAPSHOT_SPECS 人工推导，逐字比对
+//   · 档位：ModelSpec 的 reasoning / efforts → v2 的 variants（disabled / adaptive / toggle 三条路），
+//     也是逐字快照（档位漏表达时用户在选择器里根本没有那一档，这件事必须由快照钉住）
 //   · setup：成功时 `add` 调一次；网关不可达 / 空清单 / 非 JSON / 地址写错时**一次都不调**，
 //     只在 stderr 留一行警告（用户原有配置继续生效）
 //   · 空清单绝不替换上一次的清单（core 的状态机，从这一侧也钉一遍）
@@ -267,7 +269,12 @@ const ONE_PAYLOAD: OpencodeV2Payload = {
       // tools 为 true（toolCall=null 时本 agent 按支持）、模态是录制里的常量
       name: "model-01",
       capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
-      variants: [],
+      // 连 capabilities.reasoning 都没报的条目：core 按「不知道 ≠ 不支持」给 true，档位是空的
+      // → 这里就该是 none/thinking 那对 toggle，不是空数组
+      variants: [
+        { id: "none", settings: { thinking: { type: "disabled" } } },
+        { id: "thinking", settings: { thinking: { type: "adaptive", display: "summarized" } } },
+      ],
       time: { released: 0 },
       cost: [],
       status: "active",
@@ -289,7 +296,12 @@ check(
     providerID: "agentfacade",
     name: "Model 01",
     capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
-    variants: [],
+    variants: [
+      { id: "none", settings: { thinking: { type: "disabled" } } },
+      { id: "low", settings: { thinking: { type: "adaptive", display: "summarized", effort: "low" } } },
+      { id: "high", settings: { thinking: { type: "adaptive", display: "summarized", effort: "high" } } },
+      { id: "max", settings: { thinking: { type: "adaptive", display: "summarized", effort: "max" } } },
+    ],
     time: { released: 0 },
     cost: [],
     status: "active",
@@ -396,10 +408,70 @@ check(
 );
 
 check(
-  "variants 恒为空数组：上游有 4 个档位也不往里塞（形状未公开，不发明）",
-  toV2Model(SPEC).variants.length === 0 && SPEC.efforts.length === 4,
+  "档位：reasoning 且 efforts 非空 → 每档一条 variant（off 是 disabled，其余 adaptive 带同名 effort）",
+  same(toV2Model(SPEC).variants, [
+    { id: "none", settings: { thinking: { type: "disabled" } } },
+    { id: "low", settings: { thinking: { type: "adaptive", display: "summarized", effort: "low" } } },
+    { id: "high", settings: { thinking: { type: "adaptive", display: "summarized", effort: "high" } } },
+    { id: "max", settings: { thinking: { type: "adaptive", display: "summarized", effort: "max" } } },
+  ]),
   brief(toV2Model(SPEC).variants),
 );
+
+check(
+  "档位：none 与 off 走同一条 disabled 路（网关两种拼法都出现过）",
+  same(toV2Model({ ...SPEC, efforts: ["none", "high"] }).variants, [
+    { id: "none", settings: { thinking: { type: "disabled" } } },
+    { id: "high", settings: { thinking: { type: "adaptive", display: "summarized", effort: "high" } } },
+  ]),
+  brief(toV2Model({ ...SPEC, efforts: ["none", "high"] }).variants),
+);
+
+check(
+  "档位：reasoning 但 efforts 为空 → none + thinking 的 toggle 两条（空档位不是「关掉思考」）",
+  same(toV2Model({ ...SPEC, efforts: [] }).variants, [
+    { id: "none", settings: { thinking: { type: "disabled" } } },
+    { id: "thinking", settings: { thinking: { type: "adaptive", display: "summarized" } } },
+  ]),
+  brief(toV2Model({ ...SPEC, efforts: [] }).variants),
+);
+
+// 反向用例：不支持思考的模型不许被塞进任何一种档位（否则选择器里会多出选不动的档）
+check(
+  "档位：reasoning=false → variants 仍是空数组（带着 efforts 也不塞）",
+  same(toV2Model({ ...SPEC, reasoning: false }).variants, []),
+  brief(toV2Model({ ...SPEC, reasoning: false }).variants),
+);
+
+// 分支顺序也要钉：先看 reasoning、再看 efforts。反过来写（先判 efforts 空就塞 toggle）时，
+// 「不支持思考且没报档位」的模型会莫名多出两个档位 —— 上面那条（efforts 非空）抓不到这种写法
+check(
+  "档位：reasoning=false 且 efforts 也空 → 仍是空数组（先判 reasoning，再判 efforts）",
+  same(toV2Model({ ...SPEC, reasoning: false, efforts: [] }).variants, []),
+  brief(toV2Model({ ...SPEC, reasoning: false, efforts: [] }).variants),
+);
+
+check(
+  "档位：id 原样搬，拼错的 midium 与重复的 high 都不改名不去重",
+  same(toV2Model({ ...SPEC, efforts: ["high", "off", "midium", "high"] }).variants, [
+    { id: "high", settings: { thinking: { type: "adaptive", display: "summarized", effort: "high" } } },
+    { id: "none", settings: { thinking: { type: "disabled" } } },
+    { id: "midium", settings: { thinking: { type: "adaptive", display: "summarized", effort: "midium" } } },
+    { id: "high", settings: { thinking: { type: "adaptive", display: "summarized", effort: "high" } } },
+  ]),
+  brief(toV2Model({ ...SPEC, efforts: ["high", "off", "midium", "high"] }).variants),
+);
+
+{
+  // toggle 那一对每次都要新建：就地改一条模型的 variants 不该污染下一次调用（共享常量的经典漏法）
+  const mutated = toV2Model({ ...SPEC, efforts: [] });
+  mutated.variants.push({ id: "extra", settings: { thinking: { type: "disabled" } } });
+  check(
+    "档位：variants 数组不是共享常量",
+    toV2Model({ ...SPEC, efforts: [] }).variants.length === 2,
+    String(toV2Model({ ...SPEC, efforts: [] }).variants.length),
+  );
+}
 
 check(
   "固定尾巴：status / enabled / time / cost",
@@ -472,7 +544,12 @@ check(
         providerID: "agentfacade",
         name: "Model 01",
         capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
-        variants: [],
+        variants: [
+          { id: "none", settings: { thinking: { type: "disabled" } } },
+          { id: "low", settings: { thinking: { type: "adaptive", display: "summarized", effort: "low" } } },
+          { id: "high", settings: { thinking: { type: "adaptive", display: "summarized", effort: "high" } } },
+          { id: "max", settings: { thinking: { type: "adaptive", display: "summarized", effort: "max" } } },
+        ],
         time: { released: 0 },
         cost: [],
         status: "active",

@@ -170,12 +170,12 @@ interface ModelSpec {
   ```text
   模型：{ id, modelID, providerID, name,
           capabilities: { tools, input: [...], output: [...] },
-          variants: [], time: { released }, cost: [], status: "active",
+          variants: [{ id, settings: { thinking: … } }], time: { released }, cost: [], status: "active",
           enabled: true, limit: { context, output } }
   provider：{ id, name, activation, package, settings: { baseURL, apiKey } }
   ```
 
-- **v2 没有 `capabilities.reasoning`**。可选变体挂在 `variants`，但条目形状无文档、实测默认空数组，所以档位在 OpenCode 上不表达——不发明字段。
+- **档位在 OpenCode 上靠 `variants` 表达**。v2 没有 `capabilities.reasoning`；条目形状取自 opencode 源码 `packages/core/src/variant.ts`：按 provider 的 `package` 生成，我们用的 `@opencode/ai/providers/anthropic` 对应 `anthropicMessages` 协议——有 effort 时每档一条 `{ id, settings: { thinking: { type: "adaptive", display: "summarized", effort } } }`（`off`/`none` 为 `{ type: "disabled" }`），没有 effort 时是 `none` + `thinking` 的 toggle 两条。数据源是 core 的 `ModelSpec.reasoning` 与 `ModelSpec.efforts`（与 pi 的 `thinkingLevelMap` 同源）；`reasoning === false` 恒为空数组，绝不替网关改档位名、也不去重。
 - `package` 必须是导出 `model(modelID, settings)` 的模块。用 `@ai-sdk/anthropic`（v1 写法）能加载但请求失败；`@opencode/ai/providers/anthropic` 可用。
 - 配置键是复数 `plugins`，条目必须是目录。
 - `toolCall === null` 时按支持处理（与 pi 缺省一致）；`modalities === null` 时退回录制常量。

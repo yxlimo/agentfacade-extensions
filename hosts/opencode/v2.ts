@@ -1,6 +1,10 @@
 // opencode v2 的 provider 注入形状（本机 2.2.7 实测 dump 出来的，见 docs/design.md 的 OpenCode 一节）。
-// 与 v1 的差别是这次重写的理由：v2 没有 `capabilities.reasoning`，可选变体挂在 `variants`，而条目形状无文档 ——
-// 所以档位在 opencode 上不表达，这里不发明字段。也不 import `@opencode/plugin`：那个包由运行时提供。
+// 与 v1 的差别是这次重写的理由：v2 没有 `capabilities.reasoning`，可选变体挂在 `variants`。
+// variants 条目形状取自 opencode 源码 packages/core/src/variant.ts（本地检出 fe187c6）：按 provider package
+// 生成，我们用的 `@opencode/ai/providers/anthropic` 对应 anthropicMessages 协议 —— 有 effort 时每档一条
+// `{ id, settings: { thinking: { type: "adaptive", display: "summarized", effort } } }`（none/off 为
+// disabled），没有 effort 时是 none + thinking 的 toggle 两条。形状是实测的，不是发明字段。
+// 也不 import `@opencode/plugin`：那个包由运行时提供。
 
 import type { AdapterOptions, ModelSpec } from "../../core/types.ts";
 import { PROVIDER_ID, PROVIDER_NAME, providerBaseUrl } from "./catalog.ts";
@@ -22,6 +26,38 @@ function modalitiesFor(spec: ModelSpec): { input: string[]; output: string[] } {
   return { input: [...spec.modalities.input], output: [...spec.modalities.output] };
 }
 
+/**
+ * 条目形状来自 opencode 2.x 的 packages/core/src/variant.ts，不是猜的：
+ * 我们那个 provider package 只产出 disabled 与 summarized adaptive 两种 thinking 设置。
+ */
+export type OpencodeV2Variant = {
+  id: string;
+  settings: {
+    thinking:
+      | { type: "disabled" }
+      | { type: "adaptive"; display: "summarized"; effort?: string };
+  };
+};
+
+/**
+ * 档位只在 opencode 这边收敛：core 给的 efforts 是网关原样。明确不支持思考就保持空数组，
+ * 别把不支持的模型塞进选择器；efforts 为空不是「关掉思考」，那时要给 toggle 那两条。
+ */
+function variantsFor(spec: ModelSpec): OpencodeV2Variant[] {
+  if (!spec.reasoning) return [];
+  if (spec.efforts.length === 0) {
+    return [
+      { id: "none", settings: { thinking: { type: "disabled" } } },
+      { id: "thinking", settings: { thinking: { type: "adaptive", display: "summarized" } } },
+    ];
+  }
+  return spec.efforts.map((effort) =>
+    effort === "off" || effort === "none"
+      ? { id: "none", settings: { thinking: { type: "disabled" } } }
+      : { id: effort, settings: { thinking: { type: "adaptive", display: "summarized", effort } } },
+  );
+}
+
 /** opencode v2 的一条模型定义（`Model.Info` 的运行时形状） */
 export interface OpencodeV2Model {
   id: string;
@@ -33,8 +69,8 @@ export interface OpencodeV2Model {
     input: string[];
     output: string[];
   };
-  /** 可选变体。形状未知 → 恒为空数组，绝不编造 */
-  variants: never[];
+  /** 可选变体：支持思考的模型按 effort 档位或 toggle 形状生成，不支持思考的恒为空数组 */
+  variants: OpencodeV2Variant[];
   time: { released: number };
   cost: unknown[];
   status: "active";
@@ -70,7 +106,7 @@ export function toV2Model(spec: ModelSpec, providerID: string = PROVIDER_ID): Op
       tools: toolsFor(spec),
       ...modalitiesFor(spec),
     },
-    variants: [],
+    variants: variantsFor(spec),
     time: { released: 0 },
     cost: [],
     status: "active",

@@ -10,14 +10,7 @@ import path from "node:path";
 import {
 	buildSessionHeaders,
 	normalizeAgentName,
-	type SessionHeaderNames,
 } from "../../core/session-headers.ts";
-
-export const SESSION_HEADER_NAMES: SessionHeaderNames = {
-	session: "x-pi-session-id",
-	parent: "x-parent-session-id",
-	agent: "x-agent-name",
-};
 
 /** 首行足够放下 header JSON；读满仍未换行就当读不到，回退文件名，绝不顺着文件往下吞 */
 const FIRST_LINE_LIMIT = 64 * 1024;
@@ -169,18 +162,16 @@ export function registerSessionHeaderHooks(
 
 	pi.on("before_provider_headers", (event, ctx) => {
 		try {
-			// 根会话一个头都不写；「有父」与「父 id 解析成功」是两件事
+			// 根会话也发自己的 id 与名字；父 id 只在路径存在且解析到时补上
 			const parent = parentSessionPath(ctx);
-			if (parent === null) return;
 			const manager = ctx.sessionManager;
 			if (manager === undefined) return;
 
 			const key = sessionKey(ctx);
-			const extra = buildSessionHeaders(SESSION_HEADER_NAMES, {
-				hasParent: true,
+			const extra = buildSessionHeaders({
 				sessionId: manager.getSessionId?.(),
-				parentSessionId: resolver.resolve(parent, manager.getCwd?.()),
-				agentName: agents.get(key) ?? sessionAgentName(manager.getSessionName?.()),
+				parentSessionId: parent === null ? undefined : resolver.resolve(parent, manager.getCwd?.()),
+				sessionName: agents.get(key) ?? sessionAgentName(manager.getSessionName?.()),
 			});
 			if (Object.keys(extra).length === 0 || event.headers === undefined || event.headers === null) return;
 			Object.assign(event.headers, extra);

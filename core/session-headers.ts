@@ -1,8 +1,7 @@
-// 会话头的形状与归一化：宿主只交「有没有父会话」和三个待解析的值，头名由宿主给。
+// 会话头的形状与归一化：头名是本插件自己的线路契约，宿主只交三个待解析的值。
 //
-// 头名不能在这一层写死：某个宿主的命名空间前缀只有那个宿主认识；core 只认「三个位置」。
-// 另一个必须分开的事实是「有父会话」与「父 id 解析到了」：前者决定写不写，后者只决定
-// 父 id 那一格写不写 —— 父会话文件路径存在但读不到 id 时，子会话自己的 id 仍然要发出去。
+// 三个格子各自独立：解析到就写，解析不到就省略。根会话也能拿到自己的 id 与名字；
+// 父 id 缺失只代表「没有父 id 这一格」，不能当成整批不发的理由。
 
 const ID_MAX = 128;
 const AGENT_NAME_MAX = 64;
@@ -27,35 +26,27 @@ export function normalizeAgentName(value: unknown): string | null {
 	return cleaned.slice(0, AGENT_NAME_MAX);
 }
 
-export interface SessionHeaderNames {
-	/** 当前会话自己的 id 放哪个头 */
-	readonly session: string;
-	/** 父会话 id 放哪个头 */
-	readonly parent: string;
-	/** 解析到的名字放哪个头 */
-	readonly agent: string;
-}
+/** 插件自己发往网关的三个头名；宿主只认识钩子的形状，不重复声明头名 */
+export const SESSION_HEADERS = {
+	sessionId: "agentfacade-session-id",
+	parentSessionId: "agentfacade-parent-session-id",
+	sessionName: "agentfacade-session-name",
+} as const;
 
 export interface SessionIdentity {
-	/** 有父会话路径才是子会话；与下面的 parentSessionId 的解析结果分开 */
-	readonly hasParent: boolean;
 	readonly sessionId?: unknown;
 	readonly parentSessionId?: unknown;
-	readonly agentName?: unknown;
+	readonly sessionName?: unknown;
 }
 
-/** 只写解析成功的格子。根会话一个都不写 —— 头的问题不能靠「写个空值」来表示 */
-export function buildSessionHeaders(
-	names: SessionHeaderNames,
-	identity: SessionIdentity,
-): Record<string, string> {
-	if (!identity.hasParent) return {};
+/** 每格独立判定；解析不到就省略，绝不写空值 —— 空头只会把网关带偏 */
+export function buildSessionHeaders(identity: SessionIdentity): Record<string, string> {
 	const headers: Record<string, string> = {};
-	const session = normalizeSessionId(identity.sessionId);
-	if (session !== null) headers[names.session] = session;
-	const parent = normalizeSessionId(identity.parentSessionId);
-	if (parent !== null) headers[names.parent] = parent;
-	const agent = normalizeAgentName(identity.agentName);
-	if (agent !== null) headers[names.agent] = agent;
+	const sessionId = normalizeSessionId(identity.sessionId);
+	if (sessionId !== null) headers[SESSION_HEADERS.sessionId] = sessionId;
+	const parentSessionId = normalizeSessionId(identity.parentSessionId);
+	if (parentSessionId !== null) headers[SESSION_HEADERS.parentSessionId] = parentSessionId;
+	const sessionName = normalizeAgentName(identity.sessionName);
+	if (sessionName !== null) headers[SESSION_HEADERS.sessionName] = sessionName;
 	return headers;
 }

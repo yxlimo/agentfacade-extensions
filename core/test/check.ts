@@ -44,10 +44,10 @@ import { probeModels, probePlan, type ProbeResult } from "../probe.ts";
 import type { HostAdapter, ModelSpec } from "../types.ts";
 
 import {
+	SESSION_HEADERS,
 	buildSessionHeaders,
 	normalizeAgentName,
 	normalizeSessionId,
-	type SessionHeaderNames,
 } from "../session-headers.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CORE_DIR = path.join(HERE, "..");
@@ -1808,21 +1808,35 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
   );
 }
 
-// ── 会话头：core 只管归一化与「有父才写」 ────────────────────────────────
+// ── 会话头：core 只管归一化与「每格独立」 ────────────────────────────────
+//
+// 头名是插件自己的线路契约，不再是调用方传进来的参数：宿主只认识钩子的形状，不认识头名。
+// 三个格子各自独立 —— 取得到就写、取不到就省略。「有没有父会话」不再是一道整批门槛：
+// 根会话也有自己的 id 和名字，父 id 缺失只代表那一格缺失。
 console.log("");
-console.log("会话头（归一化与子会话门槛，头名由调用方给）");
+console.log("会话头（归一化与三格独立，头名是 core 自己的线路契约）");
 
-const HEADER_NAMES: SessionHeaderNames = {
-	session: "x-own-session",
-	parent: "x-parent-session",
-	agent: "x-agent-name",
-};
+check(
+	"三个头名逐字（跨宿主契约只在这里声明一份）",
+	same(Object.values(SESSION_HEADERS).sort(), [
+		"agentfacade-parent-session-id",
+		"agentfacade-session-id",
+		"agentfacade-session-name",
+	]),
+	JSON.stringify(SESSION_HEADERS),
+);
 
 check(
 	"会话 id：trim → 去控制字符 → 截断到 128（顺序按契约，不是先截断再洗）",
 	same(normalizeSessionId(`  pi/sess-1\u0000\u001f\u007f-v2  `), "pi/sess-1-v2") &&
 		normalizeSessionId("a".repeat(200)) === "a".repeat(128),
 	JSON.stringify(normalizeSessionId(`  pi/sess-1\u0000\u001f\u007f-v2  `)),
+);
+check(
+	"会话 id 长度恰好等于上限（128）时逐字保留，129 才截断",
+	normalizeSessionId("a".repeat(128)) === "a".repeat(128) &&
+		normalizeSessionId("a".repeat(129)) === "a".repeat(128),
+	JSON.stringify([normalizeSessionId("a".repeat(128))?.length, normalizeSessionId("a".repeat(129))?.length]),
 );
 check(
 	"会话 id 全是空白 / 控制字符 / 非字符串 → 未解析（null，不是空串）",
@@ -1838,25 +1852,46 @@ check(
 	JSON.stringify([normalizeAgentName("coder!! /中文 name"), normalizeAgentName("z".repeat(100))?.length]),
 );
 check(
-	"有父会话：只写解析成功的头，逐字三格（父 id 读不到也保留子会话自己的 id）",
-	same(buildSessionHeaders(HEADER_NAMES, { hasParent: true, sessionId: "  child-1  ", parentSessionId: "parent-9", agentName: "coder.a" }), {
-		"x-own-session": "child-1",
-		"x-parent-session": "parent-9",
-		"x-agent-name": "coder.a",
-	}),
-	JSON.stringify(buildSessionHeaders(HEADER_NAMES, { hasParent: true, sessionId: "child-1", parentSessionId: "parent-9", agentName: "coder.a" })),
+	"名字长度恰好等于上限（64）时逐字保留，65 才截断",
+	normalizeAgentName("z".repeat(64)) === "z".repeat(64) &&
+		normalizeAgentName("z".repeat(65)) === "z".repeat(64),
+	JSON.stringify([normalizeAgentName("z".repeat(64))?.length, normalizeAgentName("z".repeat(65))?.length]),
 );
 check(
-	"父会话 id 与名字都未解析 → 只有子会话 id，绝不写空值 / 编造父 id",
-	same(buildSessionHeaders(HEADER_NAMES, { hasParent: true, sessionId: "child-2", parentSessionId: "", agentName: "!!!" }), {
-		"x-own-session": "child-2",
+	"三格都取得到 → 逐字三个头（一次给齐；名字那一格叫 sessionName）",
+	same(buildSessionHeaders({ sessionId: "  child-1  ", parentSessionId: "parent-9", sessionName: "coder.a" }), {
+		"agentfacade-session-id": "child-1",
+		"agentfacade-parent-session-id": "parent-9",
+		"agentfacade-session-name": "coder.a",
 	}),
-	JSON.stringify(buildSessionHeaders(HEADER_NAMES, { hasParent: true, sessionId: "child-2", parentSessionId: "", agentName: "!!!" })),
+	JSON.stringify(buildSessionHeaders({ sessionId: "child-1", parentSessionId: "parent-9", sessionName: "coder.a" })),
 );
 check(
-	"根会话（没有父会话）一个头都不写，哪怕三个值都在",
-	same(buildSessionHeaders(HEADER_NAMES, { hasParent: false, sessionId: "root-1", parentSessionId: "ignored", agentName: "coder" }), {}),
-	JSON.stringify(buildSessionHeaders(HEADER_NAMES, { hasParent: false, sessionId: "root-1", parentSessionId: "ignored", agentName: "coder" })),
+	"父 id 与名字都未解析 → 只写会话 id，绝不写空值 / 编造父 id",
+	same(buildSessionHeaders({ sessionId: "child-2", parentSessionId: "", sessionName: "!!!" }), {
+		"agentfacade-session-id": "child-2",
+	}),
+	JSON.stringify(buildSessionHeaders({ sessionId: "child-2", parentSessionId: "", sessionName: "!!!" })),
+);
+check(
+	"根会话（没有父 id 这一格）照样发自己的 id 与名字 —— 不设整批门槛",
+	same(buildSessionHeaders({ sessionId: "root-1", sessionName: "coder" }), {
+		"agentfacade-session-id": "root-1",
+		"agentfacade-session-name": "coder",
+	}),
+	JSON.stringify(buildSessionHeaders({ sessionId: "root-1", sessionName: "coder" })),
+);
+check(
+	"只有父 id 取得到 → 只写父 id 这一格（三格互不牵连）",
+	same(buildSessionHeaders({ parentSessionId: "parent-9" }), { "agentfacade-parent-session-id": "parent-9" }),
+	JSON.stringify(buildSessionHeaders({ parentSessionId: "parent-9" })),
+);
+check(
+	"三值全空 → {}（一个头都不写，也不写空头）",
+	same(buildSessionHeaders({}), {}) &&
+		same(buildSessionHeaders({ sessionId: "", parentSessionId: "   ", sessionName: "///" }), {}) &&
+		same(buildSessionHeaders({ sessionId: null, parentSessionId: 42, sessionName: undefined }), {}),
+	JSON.stringify([buildSessionHeaders({}), buildSessionHeaders({ sessionId: "", parentSessionId: "   ", sessionName: "///" })]),
 );
 
 // ── 归属规则：core 里不许出现 agent 词汇 ─────────────────────────────────────

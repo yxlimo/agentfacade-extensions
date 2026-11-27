@@ -3,7 +3,7 @@
 // 父会话 id 与 agent 名在这个上下文里没有（request 只有 provider/model/sessionId/purpose/baseURL），
 // 取不到就不写 —— 不编一个出来。
 
-import { normalizeSessionId } from "../../core/session-headers.ts";
+import { SESSION_HEADERS, normalizeSessionId } from "../../core/session-headers.ts";
 
 /** dsh 传给请求级钩子的 request：只声明本插件读取的字段 */
 export interface DshRequestHeadersRequest {
@@ -27,7 +27,6 @@ export interface DshEventHost {
 }
 
 const EVENT_NAME = "llm-pi-ai/request-headers";
-const SESSION_HEADER = "x-dsh-session-id";
 
 /** 注册请求级会话头；没有 ctx.on 的环境（测试、旧版运行时）安静跳过 */
 export function registerSessionHeaders(ctx: DshEventHost): void {
@@ -40,7 +39,7 @@ export function registerSessionHeaders(ctx: DshEventHost): void {
       const out = next();
       try {
         const id = normalizeSessionId(request?.sessionId);
-        if (id !== null) out.set(SESSION_HEADER, id);
+        if (id !== null) out.set(SESSION_HEADERS.sessionId, id);
       } catch {
         // 头写不进去就少一个头；抛错会让 dsh 把整次调用判成 REQUEST_HEADERS 失败，
         // 而会话头只是附加信息，不值得让模型请求失败。

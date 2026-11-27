@@ -54,6 +54,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # hosts/pi 自带 lockfile：根 pnpm install 看不到它的 @earendil-works/pi-ai，
+      # 而根 tsconfig 会编译 hosts/pi/test/。漏掉这一步，verify 的类型检查必然报
+      # Cannot find module @earendil-works/pi-ai —— ci.yml 早就装了，这里一直漏着，
+      # 于是 v0.2.0 第一次发布在 verify 阶段就红了。
+      - name: Install host dependencies
+        working-directory: hosts/pi
+        run: pnpm install --frozen-lockfile
+
       - name: Type check
         run: pnpm run typecheck
 

@@ -224,6 +224,24 @@ interface ModelSpec {
 | dsh | cordis 事件 `llm-pi-ai/request-headers`（waterfall） | 只写 `agentfacade-session-id` | 父会话 id 与名字：该钩子的上下文只有 `provider/model/sessionId/purpose/baseURL` |
 
 dsh 的两处宿主约束值得记下：它的 provider profile 只有**静态** `headers`（`z.dict(z.string())`），放不下每会话不同的 id，所以必须走请求级钩子；那条 waterfall 的监听器必须**恰好**调一次 `next()`（它代表剩下的监听器，重调会让下游执行两遍），且抛错会让整次调用以 `REQUEST_HEADERS` 失败，所以写头失败只丢这一格头。
+
+### 只在自己的 provider 上发
+
+会话 id 与 agent 名不该发给第三方。用户选任何别家模型（Anthropic 直连、别家网关、本机推理）时，这三个头一个都不能出现 —— 否则等于把本机的会话身份随请求送给外部端点。
+
+判定收在 core 的同一个出口，签名强制要 provider：`buildSessionHeaders(identity, { id, name })`。`id` 不是字符串、或 `id !== name`、或 `name` 为空 → 返回 `{}`。这是 fail closed：拿不到 provider 就宁可不发头，绝不退回「全量发」。不导出成「格式化 + 独立 gate 两个函数」—— 那会让「忘了调 gate」重新成为可能，而本次的缺陷正是这个形状（三个宿主各自都能选择不判断）。
+
+| 宿主 | provider 取值 | 为什么是这个 |
+| --- | --- | --- |
+| pi | `ctx.model?.provider` | 事件体 `BeforeProviderHeadersEvent` 只有 `type` 与 `headers`；handler 拿到的是裸 `ExtensionContext`，`getModel()` 只挂在 `ExtensionToolContext` 上，所以只能读 `ctx.model` 属性 |
+| opencode | `event.model.providerID` | 事件对象没有顶层 provider 字段，provider 在 `model.Ref` 里（`{ id, providerID, variant? }`） |
+| dsh | `request.provider` | 就是路由键字符串；读 `config.providerName ?? PROVIDER_NAME` 解析后的值，不写死 `"agentfacade"` |
+
+两处刻意的取舍：
+
+- `ctx.model` 是「当前模型」而非「本次请求的模型」。中途换模型由 `setModel` 完成，之后的下一次请求读到的已是新模型，所以按它判定是对的；但 `ctx.model` 为 `undefined` 时（例如启动早期）按 fail closed 不发头。
+- opencode 原生支持按 provider 收窄注册（`session.hook(..., { providerID })`），本插件**不用**它：判定藏进运行时会让三宿主行为不一致，测试也只能验到「我们传了参数」，验不到「别家 provider 不写头」。
+
 ## 测试契约
 
 - `core`：纯函数 + 一次 fetch，用例注入 fetch，不起网络。

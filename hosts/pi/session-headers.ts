@@ -115,10 +115,23 @@ export interface SessionManagerLike {
 }
 export interface HookContextLike {
 	sessionManager?: SessionManagerLike;
+	/**
+	 * pi 交给钩子的是裸 ExtensionContext：只有 model 这个属性，没有 getModel()。
+	 * model.provider 是本次请求要发的 provider 名（不是模型 id）。
+	 */
+	model?: { provider?: unknown };
 }
 export interface SessionHookApi {
 	on(name: "before_agent_start", handler: (event: AgentStartEvent, ctx: HookContextLike) => void): void;
 	on(name: "before_provider_headers", handler: (event: ProviderHeaderEvent, ctx: HookContextLike) => void): void;
+}
+
+/** 注册会话头钩子需要的两样东西：provider 名从 index.ts 传进来，避免两个文件互相 import */
+export interface SessionHeaderHookOptions {
+	/** 我们注册在 pi 上的 provider 名：只有发往它的请求才带会话头 */
+	readonly providerName: string;
+	/** 父会话 id 的解析器；测试可注入，生产走默认 */
+	readonly resolver?: ParentSessionIdResolver;
 }
 
 function sessionKey(ctx: HookContextLike): string {
@@ -144,11 +157,12 @@ function parentSessionPath(ctx: HookContextLike): string | null {
 /**
  * 挂两个钩子。before_agent_start 先记住权威名字，before_provider_headers 才补头；
  * 任何读取/解析失败都吞掉 —— 会话头是附加信息，不能弄坏模型请求。
+ *
+ * providerName 从 index.ts 传进来：只有发往这个 provider 的请求才带会话头（core 的唯一出口做这个判定）。
  */
-export function registerSessionHeaderHooks(
-	pi: SessionHookApi,
-	resolver: ParentSessionIdResolver = createParentSessionIdResolver(),
-): void {
+export function registerSessionHeaderHooks(pi: SessionHookApi, options: SessionHeaderHookOptions): void {
+	const resolver = options.resolver ?? createParentSessionIdResolver();
+	const providerName = options.providerName;
 	const agents = new Map<string, string>();
 
 	pi.on("before_agent_start", (event, ctx) => {
@@ -168,11 +182,15 @@ export function registerSessionHeaderHooks(
 			if (manager === undefined) return;
 
 			const key = sessionKey(ctx);
-			const extra = buildSessionHeaders({
-				sessionId: manager.getSessionId?.(),
-				parentSessionId: parent === null ? undefined : resolver.resolve(parent, manager.getCwd?.()),
-				sessionName: agents.get(key) ?? sessionAgentName(manager.getSessionName?.()),
-			});
+			const extra = buildSessionHeaders(
+				{
+					sessionId: manager.getSessionId?.(),
+					parentSessionId: parent === null ? undefined : resolver.resolve(parent, manager.getCwd?.()),
+					sessionName: agents.get(key) ?? sessionAgentName(manager.getSessionName?.()),
+				},
+				// 只有发往我们这个 provider 的请求才带会话头；不是它就一个头都不发
+				{ id: ctx.model?.provider, name: providerName },
+			);
 			if (Object.keys(extra).length === 0 || event.headers === undefined || event.headers === null) return;
 			Object.assign(event.headers, extra);
 		} catch {

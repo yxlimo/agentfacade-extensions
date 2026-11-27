@@ -48,6 +48,7 @@ import {
 	buildSessionHeaders,
 	normalizeAgentName,
 	normalizeSessionId,
+	type HeaderTarget,
 } from "../session-headers.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CORE_DIR = path.join(HERE, "..");
@@ -1813,6 +1814,8 @@ function withoutLatency(results: readonly ProbeResult[]): unknown[] {
 // 头名是插件自己的线路契约，不再是调用方传进来的参数：宿主只认识钩子的形状，不认识头名。
 // 三个格子各自独立 —— 取得到就写、取不到就省略。「有没有父会话」不再是一道整批门槛：
 // 根会话也有自己的 id 和名字，父 id 缺失只代表那一格缺失。
+// gate 的三个输入都要能变：写死本线路常量时，下面「自定义同名 id/name」那条会红
+const SELF: HeaderTarget = { id: "agentfacade", name: "agentfacade" };
 console.log("");
 console.log("会话头（归一化与三格独立，头名是 core 自己的线路契约）");
 
@@ -1859,40 +1862,95 @@ check(
 );
 check(
 	"三格都取得到 → 逐字三个头（一次给齐；名字那一格叫 sessionName）",
-	same(buildSessionHeaders({ sessionId: "  child-1  ", parentSessionId: "parent-9", sessionName: "coder.a" }), {
+	same(buildSessionHeaders({ sessionId: "  child-1  ", parentSessionId: "parent-9", sessionName: "coder.a" }, SELF), {
 		"agentfacade-session-id": "child-1",
 		"agentfacade-parent-session-id": "parent-9",
 		"agentfacade-session-name": "coder.a",
 	}),
-	JSON.stringify(buildSessionHeaders({ sessionId: "child-1", parentSessionId: "parent-9", sessionName: "coder.a" })),
+	JSON.stringify(buildSessionHeaders({ sessionId: "child-1", parentSessionId: "parent-9", sessionName: "coder.a" }, SELF)),
 );
 check(
 	"父 id 与名字都未解析 → 只写会话 id，绝不写空值 / 编造父 id",
-	same(buildSessionHeaders({ sessionId: "child-2", parentSessionId: "", sessionName: "!!!" }), {
+	same(buildSessionHeaders({ sessionId: "child-2", parentSessionId: "", sessionName: "!!!" }, SELF), {
 		"agentfacade-session-id": "child-2",
 	}),
-	JSON.stringify(buildSessionHeaders({ sessionId: "child-2", parentSessionId: "", sessionName: "!!!" })),
+	JSON.stringify(buildSessionHeaders({ sessionId: "child-2", parentSessionId: "", sessionName: "!!!" }, SELF)),
 );
 check(
 	"根会话（没有父 id 这一格）照样发自己的 id 与名字 —— 不设整批门槛",
-	same(buildSessionHeaders({ sessionId: "root-1", sessionName: "coder" }), {
+	same(buildSessionHeaders({ sessionId: "root-1", sessionName: "coder" }, SELF), {
 		"agentfacade-session-id": "root-1",
 		"agentfacade-session-name": "coder",
 	}),
-	JSON.stringify(buildSessionHeaders({ sessionId: "root-1", sessionName: "coder" })),
+	JSON.stringify(buildSessionHeaders({ sessionId: "root-1", sessionName: "coder" }, SELF)),
 );
 check(
 	"只有父 id 取得到 → 只写父 id 这一格（三格互不牵连）",
-	same(buildSessionHeaders({ parentSessionId: "parent-9" }), { "agentfacade-parent-session-id": "parent-9" }),
-	JSON.stringify(buildSessionHeaders({ parentSessionId: "parent-9" })),
+	same(buildSessionHeaders({ parentSessionId: "parent-9" }, SELF), { "agentfacade-parent-session-id": "parent-9" }),
+	JSON.stringify(buildSessionHeaders({ parentSessionId: "parent-9" }, SELF)),
 );
 check(
 	"三值全空 → {}（一个头都不写，也不写空头）",
-	same(buildSessionHeaders({}), {}) &&
-		same(buildSessionHeaders({ sessionId: "", parentSessionId: "   ", sessionName: "///" }), {}) &&
-		same(buildSessionHeaders({ sessionId: null, parentSessionId: 42, sessionName: undefined }), {}),
-	JSON.stringify([buildSessionHeaders({}), buildSessionHeaders({ sessionId: "", parentSessionId: "   ", sessionName: "///" })]),
+	same(buildSessionHeaders({}, SELF), {}) &&
+		same(buildSessionHeaders({ sessionId: "", parentSessionId: "   ", sessionName: "///" }, SELF), {}) &&
+		same(buildSessionHeaders({ sessionId: null, parentSessionId: 42, sessionName: undefined }, SELF), {}),
+	JSON.stringify([buildSessionHeaders({}, SELF), buildSessionHeaders({ sessionId: "", parentSessionId: "   ", sessionName: "///" }, SELF)]),
 );
+
+{
+	const target: HeaderTarget = { id: "custom", name: "custom" };
+	// gate 只比 id/name 是否相等，不把 provider 名写死成常量
+	check(
+		"matching target id and name (even a custom one) emits all three headers",
+		same(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder.a" }, target), {
+			"agentfacade-session-id": "s1",
+			"agentfacade-parent-session-id": "p1",
+			"agentfacade-session-name": "coder.a",
+		}),
+		JSON.stringify(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder.a" }, target)),
+	);
+}
+check(
+	"different target id emits no headers even with a complete identity",
+	same(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "anthropic", name: "agentfacade" }), {}),
+	JSON.stringify(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "anthropic", name: "agentfacade" })),
+);
+check(
+	"missing target id fails closed even with a complete identity",
+	same(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: undefined, name: "agentfacade" }), {}),
+	JSON.stringify(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: undefined, name: "agentfacade" })),
+);
+check(
+	"empty registered name fails closed (id alone cannot open the gate)",
+	same(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "agentfacade", name: "" }), {}),
+	JSON.stringify(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "agentfacade", name: "" })),
+);
+{
+	const identity = { sessionId: "s1", parentSessionId: "p1", sessionName: "coder" };
+	const ids: unknown[] = [{}, 42, null, true];
+	// 非字符串目标 id 必须整批不发；只丢「名字那一格」仍会把别人的会话 id 泄漏出去
+	check(
+		"non-string target id emits no headers rather than only dropping the name",
+		same(ids.map((id) => buildSessionHeaders(identity, { id, name: "agentfacade" })), [{}, {}, {}, {}]),
+		JSON.stringify(ids.map((id) => buildSessionHeaders(identity, { id, name: "agentfacade" }))),
+	);
+}
+{
+	const identity = { sessionId: "  x\u0000y  ", parentSessionId: " parent-9 ", sessionName: "!!!" };
+	const blocked = buildSessionHeaders(identity, { id: "anthropic", name: "agentfacade" });
+	const allowed = buildSessionHeaders(identity, SELF);
+	// gate 先于格式化：别人线路连归一化结果都拿不到；自己线路照旧逐格清洗
+	check(
+		"gate runs before normalization; allowed target still normalizes each field",
+		same(blocked, {}) &&
+			same(allowed, {
+				"agentfacade-session-id": "xy",
+				"agentfacade-parent-session-id": "parent-9",
+			}) &&
+			!Object.hasOwn(allowed, "agentfacade-session-name"),
+		JSON.stringify({ blocked, allowed }),
+	);
+}
 
 // ── 归属规则：core 里不许出现 agent 词汇 ─────────────────────────────────────
 

@@ -1570,9 +1570,10 @@ interface HeaderCtxOptions {
 	sessionId?: string;
 	sessionName?: string;
 	cwd?: string;
+	provider?: string | null;
 }
 function headerCtx(parentSession: string | null, opts: HeaderCtxOptions = {}): HookContextLike {
-	return {
+	const ctx: HookContextLike = {
 		sessionManager: {
 			getHeader: () => (parentSession === null ? {} : { parentSession }),
 			getSessionId: () => opts.sessionId ?? "child-default",
@@ -1581,6 +1582,9 @@ function headerCtx(parentSession: string | null, opts: HeaderCtxOptions = {}): H
 			getCwd: () => opts.cwd ?? PARENT_DIR,
 		},
 	};
+	// null 代表宿主这次没给 model；不给 provider 时仍走本线路，让既有用例继续绿
+	if (opts.provider !== null) ctx.model = { provider: opts.provider ?? "agentfacade" };
+	return ctx;
 }
 function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Record<string, string> {
 	const event: ProviderHeaderEvent = { headers: initial };
@@ -1680,6 +1684,8 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 }
 {
 	const broken: HookContextLike = {
+	// 既有异常用例走的是本线路；新 gate 要求显式给出 provider，否则会误变成 fail-closed
+	model: { provider: "agentfacade" },
 		sessionManager: {
 			getHeader() {
 				throw new Error("header exploded");
@@ -1692,6 +1698,41 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 	check(
 		"getHeader 抛错被吞：原有请求头不动、不抛；父 id 那一格少掉，自己的 id 与名字照写",
 		same(headers, { "x-session-id": "keep", "agentfacade-session-id": "child-6", "agentfacade-session-name": "coder" }),
+		JSON.stringify(headers),
+	);
+}
+{
+	// 真实钩子路径：provider 字段来自 ctx.model，不是从 sessionManager 里推出来的
+	const ctx = headerCtx(UUID_PARENT, { sessionId: "child-7", sessionName: "coder", provider: "anthropic" });
+	const headers = sendHeaders(ctx, { "x-session-id": "keep" });
+	check(
+		"foreign pi provider emits no agentfacade headers",
+		same(headers, { "x-session-id": "keep" }) && !Object.keys(headers).some((key) => key.startsWith("agentfacade-")),
+		JSON.stringify(headers),
+	);
+}
+{
+	// 宿主没给 model 时 fail closed，不能把「未知」当成「本线路」
+	const ctx = headerCtx(UUID_PARENT, { sessionId: "child-8", sessionName: "coder", provider: null });
+	const headers = sendHeaders(ctx, { "x-session-id": "keep" });
+	check(
+		"missing pi model fails closed",
+		same(headers, { "x-session-id": "keep" }) && !Object.keys(headers).some((key) => key.startsWith("agentfacade-")),
+		JSON.stringify(headers),
+	);
+}
+{
+	// 正对照：前两条不是恒绿，本线路的真实请求头必须逐字带齐三格
+	const ctx = headerCtx(UUID_PARENT, { sessionId: "child-9", sessionName: "coder", provider: "agentfacade" });
+	const headers = sendHeaders(ctx, { "x-session-id": "keep" });
+	check(
+		"own pi provider emits all three headers verbatim",
+		same(headers, {
+			"x-session-id": "keep",
+			"agentfacade-session-id": "child-9",
+			"agentfacade-parent-session-id": "parent-first-line",
+			"agentfacade-session-name": "coder",
+		}),
 		JSON.stringify(headers),
 	);
 }

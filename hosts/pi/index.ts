@@ -168,7 +168,7 @@ export function describe(state: PluginState): string[] {
 export default async function facadeModels(pi: PiExtensionApi, options: PluginOptions = {}): Promise<void> {
   const warn = options.warn ?? ((message: string) => console.warn(`${PREFIX} ${message}`));
   // 会话头与网关是否可达无关：即使这一轮没注册 provider，钩子也要在
-  registerSessionHeaderHooks(pi);
+  registerSessionHeaderHooks(pi, { providerName: PROVIDER_NAME });
   const state: PluginState = {
     gateway: "",
     from: "",

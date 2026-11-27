@@ -1117,7 +1117,7 @@ function modernHost(): FakeHost {
   }
 
   const { ctx, hooks } = hookCtx();
-  registerSessionHeaders(ctx);
+  registerSessionHeaders(ctx, "agentfacade");
   check(
     "dsh 注册 llm-pi-ai/request-headers（global:true，名字逐字）",
     hooks.length === 1 && hooks[0]?.name === "llm-pi-ai/request-headers" && same(hooks[0]?.options, { global: true }),
@@ -1128,7 +1128,7 @@ function modernHost(): FakeHost {
   {
     let nextCalls = 0;
     const base = new Headers({ "x-existing": "keep" });
-    const out = listener({ sessionId: "  sess\u0007-42  " }, new Headers(), () => {
+    const out = listener({ sessionId: "  sess\u0007-42  ", provider: "agentfacade" }, new Headers(), () => {
       nextCalls++;
       return base;
     });
@@ -1145,6 +1145,7 @@ function modernHost(): FakeHost {
     const base = new Headers();
     const request = {
       sessionId: "sess-2",
+      provider: "agentfacade",
       parentSessionId: "parent-x",
       parentSession: "parent-x",
       agent: "coder-y",
@@ -1180,7 +1181,7 @@ function modernHost(): FakeHost {
     let thrown: unknown = null;
     let out: Headers | null = null;
     try {
-      out = listener({ sessionId: "sess-1" }, new Headers(), () => {
+      out = listener({ sessionId: "sess-1", provider: "agentfacade" }, new Headers(), () => {
         nextCalls++;
         return boom;
       });
@@ -1196,8 +1197,8 @@ function modernHost(): FakeHost {
   {
     let thrown: unknown = null;
     try {
-      registerSessionHeaders({});
-      registerSessionHeaders({ on: undefined });
+      registerSessionHeaders({}, "agentfacade");
+      registerSessionHeaders({ on: undefined }, "agentfacade");
     } catch (error) {
       thrown = error;
     }
@@ -1216,9 +1217,45 @@ function modernHost(): FakeHost {
       applyHooks.length === 1 && applyHooks[0]?.name === "llm-pi-ai/request-headers",
       JSON.stringify(applyHooks.map((hook) => hook.name)),
     );
-    const out = applyHooks[0]?.listener({ sessionId: "sess-apply" }, new Headers(), () => new Headers());
+    const out = applyHooks[0]?.listener({ sessionId: "sess-apply", provider: "agentfacade" }, new Headers(), () => new Headers());
     check("apply 接上的钩子发出会话头（逐字）", same(out && [...out.entries()], [["agentfacade-session-id", "sess-apply"]]), JSON.stringify(out && [...out.entries()]));
   }
+{
+	// 真实请求钩子路径：provider 来自 request，不能由插件名自己反推
+	const { ctx, hooks } = hookCtx();
+	registerSessionHeaders(ctx, "agentfacade");
+	const listener = hooks[0]!.listener;
+	const out = listener({ sessionId: "sess-foreign", provider: "anthropic" }, new Headers(), () => new Headers({ "x-existing": "keep" }));
+	check(
+		"foreign dsh provider emits no agentfacade headers",
+		same([...out.entries()], [["x-existing", "keep"]]) && ![...out.keys()].some((key) => key.startsWith("agentfacade-")),
+		JSON.stringify([...out.entries()]),
+	);
+}
+{
+	// 正对照：同一条监听器在自有线路上逐字写出会话 id，前一条才不是恒绿
+	const { ctx, hooks } = hookCtx();
+	registerSessionHeaders(ctx, "agentfacade");
+	const listener = hooks[0]!.listener;
+	const out = listener({ sessionId: "sess-self", provider: "agentfacade" }, new Headers(), () => new Headers());
+	check(
+		"own dsh provider emits the session id verbatim",
+		same([...out.entries()], [["agentfacade-session-id", "sess-self"]]),
+		JSON.stringify([...out.entries()]),
+	);
+}
+{
+	// providerName 是注册方传进来的：改成自定义名字后，匹配的请求仍要写出头
+	const { ctx, hooks } = hookCtx();
+	registerSessionHeaders(ctx, "custom");
+	const listener = hooks[0]!.listener;
+	const out = listener({ sessionId: "sess-custom", provider: "custom" }, new Headers(), () => new Headers());
+	check(
+		"custom dsh provider name is not hardcoded to agentfacade",
+		same([...out.entries()], [["agentfacade-session-id", "sess-custom"]]),
+		JSON.stringify([...out.entries()]),
+	);
+}
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

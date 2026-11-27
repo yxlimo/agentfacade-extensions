@@ -240,7 +240,7 @@ export async function syncNow(
 export async function apply(ctx: DshPluginContext, config: DshPluginConfig = {}, state: DshState = createState()): Promise<void> {
   state.report = await syncNow(ctx, config, state);
   // 静态 profile headers 装不下按请求变化的会话 id；钩子拿不到父 id，就只写自己这一格
-  registerSessionHeaders(ctx);
+  registerSessionHeaders(ctx, config.providerName ?? PROVIDER_NAME);
   // 二次 apply（热重载、测试复用同一份 state）不挂第二个定时器
   if (state.poller !== null) return;
   const ids = (): readonly string[] => state.lastGood?.models.map((model) => model.id) ?? [];

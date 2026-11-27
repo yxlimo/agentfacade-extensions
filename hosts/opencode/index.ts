@@ -121,6 +121,8 @@ export interface OpencodeV2Context {
         headers: Record<string, string | null>;
         agent?: unknown;
         sessionID?: unknown;
+        /** 本次请求要发的模型；providerID 是 provider 名（不是模型 id），用来判断是不是发往我们这条线路 */
+        model?: { id?: unknown; providerID?: unknown };
       }) => void,
     ): Promise<unknown>;
   };

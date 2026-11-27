@@ -1200,6 +1200,7 @@ type ModelRequestEvent = {
   headers: Record<string, string | null>;
   agent?: unknown;
   sessionID?: unknown;
+  model?: { providerID?: unknown };
 };
 
 /** 假 session.hook：记下交进来的 handler 与钩子名，供测试手动触发 */
@@ -1233,7 +1234,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   const { session, handlers } = fakeSessionHook();
   await registerSessionHeaders(ctxWithSession(session));
   const headers: Record<string, string | null> = {};
-  handlers[0]({ headers, agent: "coder-bot" });
+  handlers[0]({ headers, agent: "coder-bot", model: { providerID: "agentfacade" } });
   check("agent 解析到 → agentfacade-session-name 逐字写入", same(headers, { "agentfacade-session-name": "coder-bot" }), brief(headers));
 }
 
@@ -1243,7 +1244,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   const { session, handlers } = fakeSessionHook();
   await registerSessionHeaders(ctxWithSession(session));
   const headers: Record<string, string | null> = {};
-  handlers[0]({ headers, agent: "代码 agent.v2" });
+  handlers[0]({ headers, agent: "代码 agent.v2", model: { providerID: "agentfacade" } });
   check("非法字符被削 → 写削净后的逐字结果", same(headers, { "agentfacade-session-name": "agent.v2" }), brief(headers));
 }
 
@@ -1262,7 +1263,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
     "x-opencode-session-id": "sess-9",
     "x-opencode-parent-session-id": "Parent-9.UPPER",
   };
-  handlers[0]({ headers, agent: "coder", sessionID: "sess-9" });
+  handlers[0]({ headers, agent: "coder", sessionID: "sess-9", model: { providerID: "agentfacade" } });
   check(
     "原生父 id 存在 → 镜像出 agentfacade-parent-session-id（值与原生逐字相等）",
     same(headers, {
@@ -1280,7 +1281,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   const { session, handlers } = fakeSessionHook();
   await registerSessionHeaders(ctxWithSession(session));
   const headers: Record<string, string | null> = { "x-opencode-session-id": "sess-9" };
-  handlers[0]({ headers, agent: "coder", sessionID: "sess-9" });
+  handlers[0]({ headers, agent: "coder", sessionID: "sess-9", model: { providerID: "agentfacade" } });
   check(
     "没有原生父 id → agentfacade-parent-session-id 这一格不出现",
     same(headers, {
@@ -1296,7 +1297,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   const { session, handlers } = fakeSessionHook();
   await registerSessionHeaders(ctxWithSession(session));
   const headers: Record<string, string | null> = { "x-opencode-parent-session-id": "   " };
-  handlers[0]({ headers, agent: "代码" });
+  handlers[0]({ headers, agent: "代码", model: { providerID: "agentfacade" } });
   check(
     "原生父 id 是空白 → 不镜像（不写空头），原生头本身也不动",
     same(headers, { "x-opencode-parent-session-id": "   " }) &&
@@ -1312,7 +1313,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
     const { session, handlers } = fakeSessionHook();
     await registerSessionHeaders(ctxWithSession(session));
     const headers: Record<string, string | null> = {};
-    handlers[0]({ headers, agent });
+    handlers[0]({ headers, agent, model: { providerID: "agentfacade" } });
     check(
       `agent 解析不到（${JSON.stringify(agent) ?? "undefined"}）→ 不写头`,
       !Object.hasOwn(headers, "agentfacade-session-name") && Object.keys(headers).length === 0,
@@ -1330,7 +1331,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
     "x-opencode-session-id": "sess-9",
     "x-opencode-parent-session-id": "parent-9",
   };
-  handlers[0]({ headers, agent: "///" });
+  handlers[0]({ headers, agent: "///", model: { providerID: "agentfacade" } });
   check(
     "名字解析不到 → 不写 agentfacade-session-name，原生 x-opencode-* 逐字不动，父 id 仍镜像",
     same(headers, {
@@ -1353,7 +1354,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   });
   let thrown: unknown = null;
   try {
-    handlers[0]({ headers, agent: "coder" });
+    handlers[0]({ headers, agent: "coder", model: { providerID: "agentfacade" } });
   } catch (error) {
     thrown = error;
   }
@@ -1406,7 +1407,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
     "x-opencode-session-id": "sess-1",
     "x-opencode-parent-session-id": "parent-1",
   };
-  handlers[0]({ headers, agent: "coder", sessionID: "sess-1" });
+  handlers[0]({ headers, agent: "coder", sessionID: "sess-1", model: { providerID: "agentfacade" } });
   check(
     "真实触发：三格都补上（id / 父 id / 名字），原生 x-opencode-* 头逐字不动",
     same(headers, {
@@ -1440,8 +1441,54 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   check("网关不可达时 provider 不注册", added.length === 0, String(added.length));
   check("网关不可达时钩子仍然注册（会话头与网关可达性无关）", handlers.length === 1, String(handlers.length));
   const headers: Record<string, string | null> = {};
-  handlers[0]?.({ headers, agent: "coder" });
+  handlers[0]?.({ headers, agent: "coder", model: { providerID: "agentfacade" } });
   check("网关不可达时钩子照样写得出 agentfacade-session-name", same(headers, { "agentfacade-session-name": "coder" }), brief(headers));
+}
+
+{
+	// 真实 model.request 路径：providerID 来自事件的 model，不是从插件常量反推
+	const { session, handlers } = fakeSessionHook();
+	await registerSessionHeaders(ctxWithSession(session));
+	const headers: Record<string, string | null> = { "x-existing": "keep" };
+	handlers[0]({ headers, agent: "coder", sessionID: "sess-x", model: { providerID: "anthropic" } });
+	check(
+		"foreign opencode providerID leaves headers verbatim",
+		same(headers, { "x-existing": "keep" }) && !Object.keys(headers).some((key) => key.startsWith("agentfacade-")),
+		brief(headers),
+	);
+}
+{
+	// 正对照：同一条钩子在自有线路上必须逐字补齐三格，前一条才不是恒绿
+	const { session, handlers } = fakeSessionHook();
+	await registerSessionHeaders(ctxWithSession(session));
+	const headers: Record<string, string | null> = {
+		"x-opencode-session-id": "sess-9",
+		"x-opencode-parent-session-id": "parent-9",
+	};
+	handlers[0]({ headers, agent: "coder", sessionID: "sess-9", model: { providerID: "agentfacade" } });
+	check(
+		"own opencode providerID emits all three headers verbatim",
+		same(headers, {
+			"x-opencode-session-id": "sess-9",
+			"x-opencode-parent-session-id": "parent-9",
+			"agentfacade-session-id": "sess-9",
+			"agentfacade-parent-session-id": "parent-9",
+			"agentfacade-session-name": "coder",
+		}),
+		brief(headers),
+	);
+}
+{
+	// 事件没带 model 时 fail closed：未知目标不能当成本线路
+	const { session, handlers } = fakeSessionHook();
+	await registerSessionHeaders(ctxWithSession(session));
+	const headers: Record<string, string | null> = { "x-existing": "keep" };
+	handlers[0]({ headers, agent: "coder", sessionID: "sess-x" });
+	check(
+		"missing opencode model fails closed",
+		same(headers, { "x-existing": "keep" }) && !Object.keys(headers).some((key) => key.startsWith("agentfacade-")),
+		brief(headers),
+	);
 }
 
 // ── 插件导出形状 + 归属规则 ───────────────────────────────────────────────

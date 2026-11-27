@@ -211,7 +211,7 @@ interface ModelSpec {
 
 三条不变量（都是「写错就静默不生效或弄坏路由」的地方，各有能变红的用例）：
 
-1. **根会话一个头都不写**：有没有父会话是唯一的判据，不是「值解析到了没有」。子会话里父 id 读不到时，子会话自己的 id 照发。
+1. **三格各自独立**：`agentfacade-session-id` / `agentfacade-parent-session-id` / `agentfacade-session-name` 各写各的 —— 解析到就发，解析不到就省略那一格。根会话没有父 id 那一格，但自己的 id 与名字照发；「没有父 id」不再是整批不发的理由。
 2. **解析不到就省略，绝不写空值**：空串头表示不了「没解析到」，只会把网关带偏。
 3. **不碰路由头**：pi 的 `x-session-id` / `x-session-affinity` 会被 pi-subagents 改写成父会话 id 用来命中父会话的 prompt cache，覆盖它就是让父会话缓存失效。
 
@@ -219,9 +219,9 @@ interface ModelSpec {
 
 | 宿主 | 注入点 | 写的头 | 拿不到的 |
 | --- | --- | --- | --- |
-| pi | `before_provider_headers`（可原地改 `event.headers`）；`before_agent_start` 先记权威 agent 名（`<active_agent name="…">`） | `x-pi-session-id`、`x-parent-session-id`、`x-agent-name` | — （父 id 取自 `sessionManager.getHeader().parentSession` 指向的文件首行，有界读 64KB） |
-| opencode | `ctx.session.hook("model.request")` 改 `event.headers` | 只补 `x-agent-name` | 会话与父会话 id：opencode 原生就发 `x-opencode-session-id` / `x-opencode-parent-session-id`，不重复发 |
-| dsh | cordis 事件 `llm-pi-ai/request-headers`（waterfall） | `x-dsh-session-id` | 父会话 id 与 agent 名：该钩子的上下文只有 `provider/model/sessionId/purpose/baseURL` |
+| pi | `before_provider_headers`（可原地改 `event.headers`）；`before_agent_start` 先记权威 agent 名（`<active_agent name="…">`） | 三格都写：`agentfacade-session-id`、`agentfacade-parent-session-id`、`agentfacade-session-name` | — （父 id 取自 `sessionManager.getHeader().parentSession` 指向的文件首行，有界读 64KB） |
+| opencode | `ctx.session.hook("model.request")` 改 `event.headers` | 三格都写；父 id 镜像原生 `x-opencode-parent-session-id`，名字取 `event.agent` | — （父 id 与名字都来自 opencode 本身；原生 `x-opencode-*` 一个字节都不动） |
+| dsh | cordis 事件 `llm-pi-ai/request-headers`（waterfall） | 只写 `agentfacade-session-id` | 父会话 id 与名字：该钩子的上下文只有 `provider/model/sessionId/purpose/baseURL` |
 
 dsh 的两处宿主约束值得记下：它的 provider profile 只有**静态** `headers`（`z.dict(z.string())`），放不下每会话不同的 id，所以必须走请求级钩子；那条 waterfall 的监听器必须**恰好**调一次 `next()`（它代表剩下的监听器，重调会让下游执行两遍），且抛错会让整次调用以 `REQUEST_HEADERS` 失败，所以写头失败只丢这一格头。
 ## 测试契约

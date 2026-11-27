@@ -1452,7 +1452,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
 	const headers: Record<string, string | null> = { "x-existing": "keep" };
 	handlers[0]({ headers, agent: "coder", sessionID: "sess-x", model: { providerID: "anthropic" } });
 	check(
-		"foreign opencode providerID leaves headers verbatim",
+		"别的 opencode providerID → 原有头逐字不动（一个 agentfacade 头都不加）",
 		same(headers, { "x-existing": "keep" }) && !Object.keys(headers).some((key) => key.startsWith("agentfacade-")),
 		brief(headers),
 	);
@@ -1467,7 +1467,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
 	};
 	handlers[0]({ headers, agent: "coder", sessionID: "sess-9", model: { providerID: "agentfacade" } });
 	check(
-		"own opencode providerID emits all three headers verbatim",
+		"自己的 opencode providerID → 三格逐字补齐（正对照）",
 		same(headers, {
 			"x-opencode-session-id": "sess-9",
 			"x-opencode-parent-session-id": "parent-9",
@@ -1485,7 +1485,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
 	const headers: Record<string, string | null> = { "x-existing": "keep" };
 	handlers[0]({ headers, agent: "coder", sessionID: "sess-x" });
 	check(
-		"missing opencode model fails closed",
+		"事件没带 model → fail closed（未知目标不当成本线路）",
 		same(headers, { "x-existing": "keep" }) && !Object.keys(headers).some((key) => key.startsWith("agentfacade-")),
 		brief(headers),
 	);

@@ -231,6 +231,8 @@ dsh 的两处宿主约束值得记下：它的 provider profile 只有**静态**
 
 判定收在 core 的同一个出口，签名强制要 provider：`buildSessionHeaders(identity, { id, name })`。`id` 不是字符串、或 `id !== name`、或 `name` 为空 → 返回 `{}`。这是 fail closed：拿不到 provider 就宁可不发头，绝不退回「全量发」。不导出成「格式化 + 独立 gate 两个函数」—— 那会让「忘了调 gate」重新成为可能，而本次的缺陷正是这个形状（三个宿主各自都能选择不判断）。
 
+这条 gate 的强度完全取决于宿主交进来的 `id` 是**这次请求的真实去向**：宿主若把 `id` 写成自己的名字（或写死常量），`id === name` 恒成立，gate 对任何 provider 都打开。这不是假想——把 dsh 的 `id` 改成 `"agentfacade"` 之后，「别家 provider 一个头都不发」的用例立刻变红，泄漏的正是这三格身份头。所以三宿主的 `id` 一律从请求现场取，不缓存、不兜底成常量。
+
 | 宿主 | provider 取值 | 为什么是这个 |
 | --- | --- | --- |
 | pi | `ctx.model?.provider` | 事件体 `BeforeProviderHeadersEvent` 只有 `type` 与 `headers`；handler 拿到的是裸 `ExtensionContext`，`getModel()` 只挂在 `ExtensionToolContext` 上，所以只能读 `ctx.model` 属性 |

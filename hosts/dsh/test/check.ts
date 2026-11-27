@@ -1227,7 +1227,7 @@ function modernHost(): FakeHost {
 	const listener = hooks[0]!.listener;
 	const out = listener({ sessionId: "sess-foreign", provider: "anthropic" }, new Headers(), () => new Headers({ "x-existing": "keep" }));
 	check(
-		"foreign dsh provider emits no agentfacade headers",
+		"别的 dsh provider → 一个 agentfacade 头都不加（原有头逐字不动）",
 		same([...out.entries()], [["x-existing", "keep"]]) && ![...out.keys()].some((key) => key.startsWith("agentfacade-")),
 		JSON.stringify([...out.entries()]),
 	);
@@ -1239,7 +1239,7 @@ function modernHost(): FakeHost {
 	const listener = hooks[0]!.listener;
 	const out = listener({ sessionId: "sess-self", provider: "agentfacade" }, new Headers(), () => new Headers());
 	check(
-		"own dsh provider emits the session id verbatim",
+		"自己的 dsh provider → 会话 id 逐字写出（正对照，前一条不是恒绿）",
 		same([...out.entries()], [["agentfacade-session-id", "sess-self"]]),
 		JSON.stringify([...out.entries()]),
 	);
@@ -1251,7 +1251,7 @@ function modernHost(): FakeHost {
 	const listener = hooks[0]!.listener;
 	const out = listener({ sessionId: "sess-custom", provider: "custom" }, new Headers(), () => new Headers());
 	check(
-		"custom dsh provider name is not hardcoded to agentfacade",
+		"dsh 注册名可自定义 → 自定义名字的请求照样写出头（不写死成 agentfacade）",
 		same([...out.entries()], [["agentfacade-session-id", "sess-custom"]]),
 		JSON.stringify([...out.entries()]),
 	);

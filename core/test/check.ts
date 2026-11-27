@@ -1901,7 +1901,7 @@ check(
 	const target: HeaderTarget = { id: "custom", name: "custom" };
 	// gate 只比 id/name 是否相等，不把 provider 名写死成常量
 	check(
-		"matching target id and name (even a custom one) emits all three headers",
+		"目标 id 与注册名相同（自定义名字也算）→ 逐字三个头（不把 agentfacade 写死成常量）",
 		same(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder.a" }, target), {
 			"agentfacade-session-id": "s1",
 			"agentfacade-parent-session-id": "p1",
@@ -1911,26 +1911,36 @@ check(
 	);
 }
 check(
-	"different target id emits no headers even with a complete identity",
+	"目标 id 与注册名不同 → 一个头都不发（身份三格再全也不发）",
 	same(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "anthropic", name: "agentfacade" }), {}),
 	JSON.stringify(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "anthropic", name: "agentfacade" })),
 );
 check(
-	"missing target id fails closed even with a complete identity",
+	"目标 id 不是字符串（缺失 / 非字符串）→ 一个头都不发（fail closed，不猜）",
 	same(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: undefined, name: "agentfacade" }), {}),
 	JSON.stringify(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: undefined, name: "agentfacade" })),
 );
 check(
-	"empty registered name fails closed (id alone cannot open the gate)",
+	"注册名为空、与目标 id 对不上 → 一个头都不发（名字这一格对不上就整批拦下）",
 	same(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "agentfacade", name: "" }), {}),
 	JSON.stringify(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "agentfacade", name: "" })),
 );
+{
+	// 空 name 在真实路径可达：dsh 的 providerName 是 `config.providerName ?? PROVIDER_NAME`，
+	// `??` 不拦空串 —— 用户把 providerName 配成 "" 时，注册名就是 ""。
+	// id 与 name 同为空串是唯一能区分两道拦截的输入：删掉 `name === ""` 后 `"" !== ""` 不成立，闸就开了。
+	check(
+		"目标 id 与注册名同为空串 → 一个头都不发（空 name 这一道拦截真的在拦）",
+		same(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "", name: "" }), {}),
+		JSON.stringify(buildSessionHeaders({ sessionId: "s1", parentSessionId: "p1", sessionName: "coder" }, { id: "", name: "" })),
+	);
+}
 {
 	const identity = { sessionId: "s1", parentSessionId: "p1", sessionName: "coder" };
 	const ids: unknown[] = [{}, 42, null, true];
 	// 非字符串目标 id 必须整批不发；只丢「名字那一格」仍会把别人的会话 id 泄漏出去
 	check(
-		"non-string target id emits no headers rather than only dropping the name",
+		"目标 id 不是字符串 → 整批一个头都不发（不是只丢名字那一格）",
 		same(ids.map((id) => buildSessionHeaders(identity, { id, name: "agentfacade" })), [{}, {}, {}, {}]),
 		JSON.stringify(ids.map((id) => buildSessionHeaders(identity, { id, name: "agentfacade" }))),
 	);
@@ -1939,9 +1949,10 @@ check(
 	const identity = { sessionId: "  x\u0000y  ", parentSessionId: " parent-9 ", sessionName: "!!!" };
 	const blocked = buildSessionHeaders(identity, { id: "anthropic", name: "agentfacade" });
 	const allowed = buildSessionHeaders(identity, SELF);
-	// gate 先于格式化：别人线路连归一化结果都拿不到；自己线路照旧逐格清洗
+	// 只断产出的头，不断内部顺序：被 gate 拦下的目标一个头都不出，放行的目标逐格清洗。
+	// gate 与格式化的先后在产出上不可观测，所以这里不为它加计数 spy。
 	check(
-		"gate runs before normalization; allowed target still normalizes each field",
+		"被 gate 拦下的目标一个头都不出；放行的目标逐格清洗（空白、控制字符、非法名）",
 		same(blocked, {}) &&
 			same(allowed, {
 				"agentfacade-session-id": "xy",

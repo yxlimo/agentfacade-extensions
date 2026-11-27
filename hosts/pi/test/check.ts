@@ -1706,7 +1706,7 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 	const ctx = headerCtx(UUID_PARENT, { sessionId: "child-7", sessionName: "coder", provider: "anthropic" });
 	const headers = sendHeaders(ctx, { "x-session-id": "keep" });
 	check(
-		"foreign pi provider emits no agentfacade headers",
+		"别的 pi provider → 一个 agentfacade 头都不加（原有头不动）",
 		same(headers, { "x-session-id": "keep" }) && !Object.keys(headers).some((key) => key.startsWith("agentfacade-")),
 		JSON.stringify(headers),
 	);
@@ -1716,7 +1716,7 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 	const ctx = headerCtx(UUID_PARENT, { sessionId: "child-8", sessionName: "coder", provider: null });
 	const headers = sendHeaders(ctx, { "x-session-id": "keep" });
 	check(
-		"missing pi model fails closed",
+		"宿主没给 model → fail closed（不把未知当本线路）",
 		same(headers, { "x-session-id": "keep" }) && !Object.keys(headers).some((key) => key.startsWith("agentfacade-")),
 		JSON.stringify(headers),
 	);
@@ -1726,7 +1726,7 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 	const ctx = headerCtx(UUID_PARENT, { sessionId: "child-9", sessionName: "coder", provider: "agentfacade" });
 	const headers = sendHeaders(ctx, { "x-session-id": "keep" });
 	check(
-		"own pi provider emits all three headers verbatim",
+		"自己的 pi provider → 三格逐字带齐（正对照）",
 		same(headers, {
 			"x-session-id": "keep",
 			"agentfacade-session-id": "child-9",

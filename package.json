@@ -1,7 +1,7 @@
 {
   "name": "agentfacade-extensions",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "One core, several agents: turn the AgentFacade gateway model catalog into each agent host's provider config",
   "scripts": {

@@ -2,5 +2,5 @@ node_modules/
 dist/
 .probe/
 .build/
-# review 角色的报告落在仓库内（/tmp 在沙箱里是不可写的私有 tmpfs）
-.pi/review-reports/
+# 角色 md 的 output.deliverable 落在这里（子代理的报告），不参与版本控制
+context/

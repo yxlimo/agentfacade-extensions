@@ -49,7 +49,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
-          cache: pnpm
+          # 发布流程不缓存：缓存是跨运行可写的输入，一旦被投毒，校验过的字节就不再
+          # 来自这份 lockfile。publish 这里慢几十秒换一个干净的输入面。
+          package-manager-cache: false
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

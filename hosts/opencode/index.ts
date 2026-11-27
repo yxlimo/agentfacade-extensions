@@ -112,7 +112,7 @@ export interface OpencodeV2Context {
   /**
    * 会话钩子面：由 opencode 运行时注入。它的类型包不在本仓依赖里，这里只声明用到的那一格，
    * 形状照上游运行时（2.2.7 实测）：model.request 事件的 headers 可直接改。opencode 原生就发
-   * 会话与父会话头，本插件只用它补 x-agent-name，那两个头一个都不碰。
+   * 会话与父会话头，本插件把这两个 id 镜像成自己的 agentfacade-* 头，原生头一个都不碰。
    */
   session?: {
     hook(

@@ -1598,20 +1598,36 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 		"子会话三头逐字；pi / pi-subagents 的路由头保持父会话值（覆盖会破坏 prompt cache）",
 		same(headers, {
 			...reserved,
-			"x-pi-session-id": "child-session-id",
-			"x-parent-session-id": "parent-first-line",
-			"x-agent-name": "coder-one",
+			"agentfacade-session-id": "child-session-id",
+			"agentfacade-parent-session-id": "parent-first-line",
+			"agentfacade-session-name": "coder-one",
 		}),
 		JSON.stringify(headers),
 	);
 }
 {
+	// 根会话没有父 id 这一格，自己的 id 与名字照样发：缺父 id 不是「整批不发」的理由
 	const ctx = headerCtx(null, { sessionId: "root-1", sessionName: "coder-root" });
-	hookPi.hooks.beforeAgentStart?.({ systemPrompt: '<active_agent name="ignored">' }, ctx);
+	hookPi.hooks.beforeAgentStart?.({ systemPrompt: '<active_agent name="coder-root">' }, ctx);
 	const headers = sendHeaders(ctx, { "x-session-id": "pi-root", "x-session-affinity": "pi-root" });
 	check(
-		"根会话一个头都不写（有 agent 名也不写）—— 只由 parentSession 决定",
-		same(headers, { "x-session-id": "pi-root", "x-session-affinity": "pi-root" }),
+		"根会话发自己的 id 与名字，不发父 id",
+		same(headers, {
+			"x-session-id": "pi-root",
+			"x-session-affinity": "pi-root",
+			"agentfacade-session-id": "root-1",
+			"agentfacade-session-name": "coder-root",
+		}) && !Object.hasOwn(headers, "agentfacade-parent-session-id"),
+		JSON.stringify(headers),
+	);
+}
+{
+	// 名字也解析不到时只少那一格：id 照发，父 id 仍然不编
+	const ctx = headerCtx(null, { sessionId: "root-2", sessionName: "" });
+	const headers = sendHeaders(ctx, {});
+	check(
+		"根会话没有名字 → 只发 id，仍不发父 id（也不写空名字头）",
+		same(headers, { "agentfacade-session-id": "root-2" }) && !Object.hasOwn(headers, "agentfacade-parent-session-id"),
 		JSON.stringify(headers),
 	);
 }
@@ -1621,9 +1637,9 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 	check(
 		"没有权威标记 → 会话名像 agent 名时逐字写入（两级回退）",
 		same(headers, {
-			"x-pi-session-id": "child-2",
-			"x-parent-session-id": "parent-first-line",
-			"x-agent-name": "coder.two",
+			"agentfacade-session-id": "child-2",
+			"agentfacade-parent-session-id": "parent-first-line",
+			"agentfacade-session-name": "coder.two",
 		}),
 		JSON.stringify(headers),
 	);
@@ -1632,11 +1648,11 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 	const ctx = headerCtx(UUID_PARENT, { sessionId: "child-3", sessionName: "会话 名称" });
 	const headers = sendHeaders(ctx, {});
 	check(
-		"会话名不像 agent 名 → 省略 x-agent-name，但子/父 id 照写",
+		"会话名不像 agent 名 → 省略 agentfacade-session-name，但子/父 id 照写",
 		same(headers, {
-			"x-pi-session-id": "child-3",
-			"x-parent-session-id": "parent-first-line",
-		}) && !Object.hasOwn(headers, "x-agent-name"),
+			"agentfacade-session-id": "child-3",
+			"agentfacade-parent-session-id": "parent-first-line",
+		}) && !Object.hasOwn(headers, "agentfacade-session-name"),
 		JSON.stringify(headers),
 	);
 }
@@ -1645,7 +1661,7 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 	const headers = sendHeaders(ctx, {});
 	check(
 		"父 id 解析失败 → 不写父头，也不把整个子会话头一起丢掉",
-		same(headers, { "x-pi-session-id": "child-4", "x-agent-name": "coder" }),
+		same(headers, { "agentfacade-session-id": "child-4", "agentfacade-session-name": "coder" }),
 		JSON.stringify(headers),
 	);
 }
@@ -1655,9 +1671,9 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 	check(
 		"parentSession 是相对路径时按 getCwd 解析，仍读到首行 id",
 		same(headers, {
-			"x-pi-session-id": "child-5",
-			"x-parent-session-id": "parent-first-line",
-			"x-agent-name": "coder",
+			"agentfacade-session-id": "child-5",
+			"agentfacade-parent-session-id": "parent-first-line",
+			"agentfacade-session-name": "coder",
 		}),
 		JSON.stringify(headers),
 	);
@@ -1673,7 +1689,11 @@ function sendHeaders(ctx: HookContextLike, initial: Record<string, string>): Rec
 		},
 	};
 	const headers = sendHeaders(broken, { "x-session-id": "keep" });
-	check("sessionManager 抛错被吞掉，原有请求头不动、不抛", same(headers, { "x-session-id": "keep" }), JSON.stringify(headers));
+	check(
+		"getHeader 抛错被吞：原有请求头不动、不抛；父 id 那一格少掉，自己的 id 与名字照写",
+		same(headers, { "x-session-id": "keep", "agentfacade-session-id": "child-6", "agentfacade-session-name": "coder" }),
+		JSON.stringify(headers),
+	);
 }
 
 console.log(fail === 0 ? `全部通过（${pass} 条）` : `${fail} 条失败，${pass} 条通过`);

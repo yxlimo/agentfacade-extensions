@@ -1919,33 +1919,76 @@ console.log("core 的归属规则（禁用词扫描）");
   const files = ["types.ts", "catalog.ts", "gateway.ts", "sync.ts", "gateway-config.ts", "auth.ts", "poll.ts", "probe.ts", "session-headers.ts"];
   // 「agentfacade」是工具链自己的目录名/项名：gateway-config.ts 里只许出现在 config.json 路径上，
   // auth.ts 整份文件管的就是 auth.json（路径、项名、报错文案全是它）。
+  // session-headers.ts 里它又是插件自己的**线路契约**（agentfacade-session-id 等三个头名）——
+  // 那是我们发给网关的头，不是宿主的词汇。所以这个文件只放行 `agentfacade-` 前缀，裸词照样越界。
   // 其它文件出现一次就算越界。
-  const AGENTFACADE_EXEMPT: Record<string, string | null> = { "gateway-config.ts": "config.json", "auth.ts": null };
-  const hits: string[] = [];
-  const keyHits: string[] = [];
-  for (const file of files) {
-    const text = fs.readFileSync(path.join(CORE_DIR, file), "utf8");
-    for (const word of FORBIDDEN) {
-      if (word === "agentfacade" && file in AGENTFACADE_EXEMPT) {
-        const tail = AGENTFACADE_EXEMPT[file];
-        const offender =
-          tail === null
-            ? undefined
-            : text.split("\n").find((line) => line.includes("agentfacade") && !line.includes(tail));
-        if (offender !== undefined) hits.push(`${file}: agentfacade outside the ${tail} path`);
-        continue;
+  const AGENTFACADE_EXEMPT: Record<string, string | null> = {
+    "gateway-config.ts": "config.json",
+    "auth.ts": null,
+    "session-headers.ts": "agentfacade-",
+  };
+  // 扫描只有一份：真实源码和人造文本都走 scanAgentVocabulary。守卫用例另抄一段判定等于没钉住
+  // （改了一处、另一处照样绿），所以判定留在这里、由下面的用例重新喂输入。
+  function scanAgentVocabulary(sources: Record<string, string>): { hits: string[]; keyHits: string[] } {
+    const hits: string[] = [];
+    const keyHits: string[] = [];
+    for (const [file, text] of Object.entries(sources)) {
+      for (const word of FORBIDDEN) {
+        if (word === "agentfacade" && file in AGENTFACADE_EXEMPT) {
+          const tail = AGENTFACADE_EXEMPT[file];
+          const offender =
+            tail === null
+              ? undefined
+              : text.split("\n").find((line) => line.includes("agentfacade") && !line.includes(tail));
+          if (offender !== undefined) hits.push(`${file}: agentfacade outside the ${tail} path`);
+          continue;
+        }
+        if (text.includes(word)) hits.push(`${file}: ${word}`);
       }
-      if (text.includes(word)) hits.push(`${file}: ${word}`);
+      if (file !== "catalog.ts" && text.includes(PAYLOAD_ONLY)) hits.push(`${file}: ${PAYLOAD_ONLY}`);
+      if (/(^|[\s,{])capabilities\s*:/m.test(text)) keyHits.push(file);
     }
-    if (file !== "catalog.ts" && text.includes(PAYLOAD_ONLY)) hits.push(`${file}: ${PAYLOAD_ONLY}`);
-    if (/(^|[\s,{])capabilities\s*:/m.test(text)) keyHits.push(file);
+    return { hits, keyHits };
   }
+
+  const sources: Record<string, string> = {};
+  for (const file of files) sources[file] = fs.readFileSync(path.join(CORE_DIR, file), "utf8");
+  const { hits, keyHits } = scanAgentVocabulary(sources);
   check("core 的九个源文件里没有 agent 词汇", hits.length === 0, JSON.stringify(hits));
   check("capabilities 只在读报文的位置，没变成我们自己的字段名", keyHits.length === 0, JSON.stringify(keyHits));
   check(
     "扫描确实读到了九个源文件（不然上一行永远绿）",
     files.every((file) => fs.existsSync(path.join(CORE_DIR, file))),
     JSON.stringify(files),
+  );
+
+  // 那条豁免只买了「agentfacade- 前缀」这一种写法，而且只买了 session-headers.ts 这一个文件。
+  // 两条边界都用同一份判定重新喂输入来钉：放宽成「整个文件闭嘴」或「裸词也算我们的」时立刻红。
+  const hitsFor = (file: string, text: string): string[] => scanAgentVocabulary({ [file]: text }).hits;
+  const PREFIXED = 'export const SESSION_HEADERS = { sessionId: "agentfacade-session-id" };\n';
+  check(
+    "守卫：session-headers.ts 里的 agentfacade- 前缀不算越界（头名是插件自己的线路契约）",
+    same(hitsFor("session-headers.ts", PREFIXED), []),
+    JSON.stringify(hitsFor("session-headers.ts", PREFIXED)),
+  );
+  check(
+    "守卫：session-headers.ts 里出现裸 agentfacade（不带 -）仍判越界",
+    same(hitsFor("session-headers.ts", "// 会话头这份契约属于 agentfacade\n"), [
+      "session-headers.ts: agentfacade outside the agentfacade- path",
+    ]),
+    JSON.stringify(hitsFor("session-headers.ts", "// 会话头这份契约属于 agentfacade\n")),
+  );
+  check(
+    "守卫：同一文件里前缀行不掩护裸词行 —— 豁免是逐行的（写前缀时顺手写进裸词就会红）",
+    same(hitsFor("session-headers.ts", `${PREFIXED}// 会话头这份契约属于 agentfacade 自己\n`), [
+      "session-headers.ts: agentfacade outside the agentfacade- path",
+    ]),
+    JSON.stringify(hitsFor("session-headers.ts", `${PREFIXED}// 会话头这份契约属于 agentfacade 自己\n`)),
+  );
+  check(
+    "守卫：同样的 agentfacade- 前缀换到别的 core 文件就判越界（豁免是逐文件的，不是逐词的）",
+    same(hitsFor("sync.ts", PREFIXED), ["sync.ts: agentfacade"]),
+    JSON.stringify(hitsFor("sync.ts", PREFIXED)),
   );
 }
 

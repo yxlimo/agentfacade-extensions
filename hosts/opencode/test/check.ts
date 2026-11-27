@@ -12,7 +12,7 @@
 //   · 空清单绝不替换上一次的清单（core 的状态机，从这一侧也钉一遍）
 //   · 网关地址：OPENCODE_FACADE_GATEWAY > FACADE_GATEWAY > 配置文件 > 默认
 //   · 归属规则：这一层不碰网关协议，也没有任何写文件的 API
-//   · 会话身份头：model.request 补 x-agent-name（逐字写入、解析不到不写、不动原生头、异常吞掉）
+//   · 会话身份头：model.request 上把 id / 父 id 镜像成 agentfacade-* 再补名字（逐字写入、解析不到不写、不动原生头、异常吞掉）
 //
 // 全部离线：网络用注入的 fetch 伪造（不起端口、不连真网关），配置文件用临时主目录。
 // 期望值一律手写并逐字比对，不写「是对象」「是数组」这种断言 —— 那种断言在映射改坏后照样绿。
@@ -1186,13 +1186,14 @@ check("超时预算是 1500ms（启动路径上被 await 的那个数）", DEFAU
   check("空的 agent 变量被跳过，落到 FACADE_GATEWAY", same(calls.map(listTarget), ["http://facade.example:6450/v1/models"]), JSON.stringify(calls));
 }
 
-// ── 会话身份头：model.request 上补 x-agent-name ──────────────────────────────
+// ── 会话身份头：model.request 上补 agentfacade-* ──────────────────────────────
 //
-// opencode 原生发会话与父会话头，本层只补 agent 名。钩子入口用假 ctx 注入、handler 手动触发，
-// 断言 headers 对象逐字 —— 头名与值都写死成字面量，实现改坏时这一节必须红。
+// opencode 原生就发 x-opencode-session-id / x-opencode-parent-session-id：本层把两个 id 逐字镜像到
+// 插件自己的 agentfacade-* 头名，再补会话名字；原生那几个头一个字节都不许动。钩子入口用假 ctx
+// 注入、handler 手动触发，断言 headers 对象逐字 —— 头名与值都写死成字面量，实现改坏时这一节必须红。
 
 console.log("");
-console.log("会话身份头（model.request，x-agent-name）");
+console.log("会话身份头（model.request，agentfacade-*）");
 
 /** model.request 事件的形状：与 index.ts 里 OpencodeV2Context.session 的声明一致 */
 type ModelRequestEvent = {
@@ -1233,7 +1234,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   await registerSessionHeaders(ctxWithSession(session));
   const headers: Record<string, string | null> = {};
   handlers[0]({ headers, agent: "coder-bot" });
-  check("agent 解析到 → x-agent-name 逐字写入", same(headers, { "x-agent-name": "coder-bot" }), brief(headers));
+  check("agent 解析到 → agentfacade-session-name 逐字写入", same(headers, { "agentfacade-session-name": "coder-bot" }), brief(headers));
 }
 
 {
@@ -1243,13 +1244,65 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   await registerSessionHeaders(ctxWithSession(session));
   const headers: Record<string, string | null> = {};
   handlers[0]({ headers, agent: "代码 agent.v2" });
-  check("非法字符被削 → 写削净后的逐字结果", same(headers, { "x-agent-name": "agent.v2" }), brief(headers));
+  check("非法字符被削 → 写削净后的逐字结果", same(headers, { "agentfacade-session-name": "agent.v2" }), brief(headers));
 }
 
 {
   const { session, hookNames } = fakeSessionHook();
   await registerSessionHeaders(ctxWithSession(session));
   check("钩子名是 model.request", same(hookNames, ["model.request"]), JSON.stringify(hookNames));
+}
+
+{
+  // 父会话 id 在 opencode 侧只有一个来源：原生的 x-opencode-parent-session-id。镜像到本插件的头名，
+  // 值逐字相等（不加工、不改大小写），原生头本身一个字节都不动
+  const { session, handlers } = fakeSessionHook();
+  await registerSessionHeaders(ctxWithSession(session));
+  const headers: Record<string, string | null> = {
+    "x-opencode-session-id": "sess-9",
+    "x-opencode-parent-session-id": "Parent-9.UPPER",
+  };
+  handlers[0]({ headers, agent: "coder", sessionID: "sess-9" });
+  check(
+    "原生父 id 存在 → 镜像出 agentfacade-parent-session-id（值与原生逐字相等）",
+    same(headers, {
+      "x-opencode-session-id": "sess-9",
+      "x-opencode-parent-session-id": "Parent-9.UPPER",
+      "agentfacade-session-id": "sess-9",
+      "agentfacade-parent-session-id": "Parent-9.UPPER",
+      "agentfacade-session-name": "coder",
+    }) && headers["agentfacade-parent-session-id"] === headers["x-opencode-parent-session-id"],
+    brief(headers),
+  );
+}
+{
+  // 没有父会话：那一格不许出现。写一个空头等于替 opencode 断言「父 id 是空」
+  const { session, handlers } = fakeSessionHook();
+  await registerSessionHeaders(ctxWithSession(session));
+  const headers: Record<string, string | null> = { "x-opencode-session-id": "sess-9" };
+  handlers[0]({ headers, agent: "coder", sessionID: "sess-9" });
+  check(
+    "没有原生父 id → agentfacade-parent-session-id 这一格不出现",
+    same(headers, {
+      "x-opencode-session-id": "sess-9",
+      "agentfacade-session-id": "sess-9",
+      "agentfacade-session-name": "coder",
+    }) && !Object.hasOwn(headers, "agentfacade-parent-session-id"),
+    brief(headers),
+  );
+}
+{
+  // 原生父 id 只有空白：空白不是 id，同样不写空头，原生那一格原样留着
+  const { session, handlers } = fakeSessionHook();
+  await registerSessionHeaders(ctxWithSession(session));
+  const headers: Record<string, string | null> = { "x-opencode-parent-session-id": "   " };
+  handlers[0]({ headers, agent: "代码" });
+  check(
+    "原生父 id 是空白 → 不镜像（不写空头），原生头本身也不动",
+    same(headers, { "x-opencode-parent-session-id": "   " }) &&
+      !Object.hasOwn(headers, "agentfacade-parent-session-id"),
+    brief(headers),
+  );
 }
 
 {
@@ -1262,14 +1315,15 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
     handlers[0]({ headers, agent });
     check(
       `agent 解析不到（${JSON.stringify(agent) ?? "undefined"}）→ 不写头`,
-      !Object.hasOwn(headers, "x-agent-name") && Object.keys(headers).length === 0,
+      !Object.hasOwn(headers, "agentfacade-session-name") && Object.keys(headers).length === 0,
       brief(headers),
     );
   }
 }
 
 {
-  // 原生会话头是 opencode 运行时的：本层只加不减，解析不到时也一个都不许改
+  // 原生会话头是 opencode 运行时的：本层只加不减。名字解析不到就少那一格，
+  // 但原生父 id 照样镜像 —— 少一个名字不是「整批不发」的理由
   const { session, handlers } = fakeSessionHook();
   await registerSessionHeaders(ctxWithSession(session));
   const headers: Record<string, string | null> = {
@@ -1278,8 +1332,12 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   };
   handlers[0]({ headers, agent: "///" });
   check(
-    "解析不到 → 不写 x-agent-name，也不动已有的 x-opencode-* 头",
-    same(headers, { "x-opencode-session-id": "sess-9", "x-opencode-parent-session-id": "parent-9" }),
+    "名字解析不到 → 不写 agentfacade-session-name，原生 x-opencode-* 逐字不动，父 id 仍镜像",
+    same(headers, {
+      "x-opencode-session-id": "sess-9",
+      "x-opencode-parent-session-id": "parent-9",
+      "agentfacade-parent-session-id": "parent-9",
+    }) && !Object.hasOwn(headers, "agentfacade-session-name"),
     brief(headers),
   );
 }
@@ -1350,11 +1408,13 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   };
   handlers[0]({ headers, agent: "coder", sessionID: "sess-1" });
   check(
-    "真实触发：补 x-agent-name，x-opencode-* 头逐字不动",
+    "真实触发：三格都补上（id / 父 id / 名字），原生 x-opencode-* 头逐字不动",
     same(headers, {
       "x-opencode-session-id": "sess-1",
       "x-opencode-parent-session-id": "parent-1",
-      "x-agent-name": "coder",
+      "agentfacade-session-id": "sess-1",
+      "agentfacade-parent-session-id": "parent-1",
+      "agentfacade-session-name": "coder",
     }),
     brief(headers),
   );
@@ -1381,7 +1441,7 @@ function ctxWithSession(session?: OpencodeV2Context["session"]): OpencodeV2Conte
   check("网关不可达时钩子仍然注册（会话头与网关可达性无关）", handlers.length === 1, String(handlers.length));
   const headers: Record<string, string | null> = {};
   handlers[0]?.({ headers, agent: "coder" });
-  check("网关不可达时钩子照样写得出 x-agent-name", same(headers, { "x-agent-name": "coder" }), brief(headers));
+  check("网关不可达时钩子照样写得出 agentfacade-session-name", same(headers, { "agentfacade-session-name": "coder" }), brief(headers));
 }
 
 // ── 插件导出形状 + 归属规则 ───────────────────────────────────────────────

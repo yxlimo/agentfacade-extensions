@@ -38,7 +38,12 @@ import type { ModelSpec } from "../../../core/types.ts";
 import { DEFAULT_GATEWAY, DEFAULT_TIMEOUT_MS, resolveDshGateway } from "../gateway-source.ts";
 import type { PollerTimers } from "../../../core/poll.ts";
 
-import { registerSessionHeaders, type DshEventHost, type DshRequestHeadersListener } from "../session-headers.ts";
+import {
+  registerSessionHeaders,
+  type DshEventHost,
+  type DshRequestHeadersListener,
+  type DshRequestHeadersRequest,
+} from "../session-headers.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 let pass = 0;
@@ -1129,7 +1134,29 @@ function modernHost(): FakeHost {
     });
     check(
       "会话 id 逐字写入（去空白与控制字符），上游头不动，next 调用一次",
-      nextCalls === 1 && out === base && same([...out.entries()], [["x-dsh-session-id", "sess-42"], ["x-existing", "keep"]]),
+      nextCalls === 1 && out === base && same([...out.entries()], [["agentfacade-session-id", "sess-42"], ["x-existing", "keep"]]),
+      JSON.stringify({ nextCalls, headers: [...out.entries()] }),
+    );
+  }
+  {
+    // dsh 的请求级上下文只有 sessionId：没有父 id，也没有 agent 名。就算请求对象上出现了同名字段，
+    // 也不许拿它们编出头来（上游没承诺过的东西），只认 sessionId 这一格
+    let nextCalls = 0;
+    const base = new Headers();
+    const request = {
+      sessionId: "sess-2",
+      parentSessionId: "parent-x",
+      parentSession: "parent-x",
+      agent: "coder-y",
+      sessionName: "coder-y",
+    } as unknown as DshRequestHeadersRequest;
+    const out = listener(request, new Headers(), () => {
+      nextCalls++;
+      return base;
+    });
+    check(
+      "只写 agentfacade-session-id：父 id 与名字在 dsh 没有来源，请求上就算有同名字段也不读",
+      nextCalls === 1 && same([...out.entries()], [["agentfacade-session-id", "sess-2"]]),
       JSON.stringify({ nextCalls, headers: [...out.entries()] }),
     );
   }
@@ -1190,7 +1217,7 @@ function modernHost(): FakeHost {
       JSON.stringify(applyHooks.map((hook) => hook.name)),
     );
     const out = applyHooks[0]?.listener({ sessionId: "sess-apply" }, new Headers(), () => new Headers());
-    check("apply 接上的钩子发出会话头（逐字）", same(out && [...out.entries()], [["x-dsh-session-id", "sess-apply"]]), JSON.stringify(out && [...out.entries()]));
+    check("apply 接上的钩子发出会话头（逐字）", same(out && [...out.entries()], [["agentfacade-session-id", "sess-apply"]]), JSON.stringify(out && [...out.entries()]));
   }
 }
 
